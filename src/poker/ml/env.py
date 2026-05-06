@@ -290,10 +290,15 @@ class PokerEnv(gym.Env):
 
                 # Move to next street if not at river
                 if self.state.street != Street.RIVER:
-                    self.state = dc_replace(self.state,street=Street(self.state.street.value + 1))
+                    next_street_map = {
+                        Street.PREFLOP: Street.FLOP,
+                        Street.FLOP: Street.TURN,
+                        Street.TURN: Street.RIVER,
+                    }
+                    self.state = dc_replace(self.state, street=next_street_map[self.state.street])
                     if self.state.street == Street.FLOP:
                         deck = Deck(rng=RNG(seed=int(self.rng.integers(0, 2**31 - 1))))
-                        self.state = dc_replace(self.state,community_cards=deal_flop(deck))
+                        self.state = dc_replace(self.state, community_cards=deal_flop(deck))
                 else:
                     hand_ended = True
                     break

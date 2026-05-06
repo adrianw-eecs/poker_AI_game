@@ -134,6 +134,8 @@ replays/
 checkpoints/
 games/
 test.jsonl
+data/
+models/
 
 # Corrupted path artifacts (from path parsing errors)
 D:Claude_Projectspokersrcpokerengine/
