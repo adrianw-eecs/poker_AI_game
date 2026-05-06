@@ -1,0 +1,43 @@
+# Temporary files and game run data
+# This directory contains temporary test files and game logs that should not be committed to version control
+
+# Game run data
+game_runs/
+*.jsonl
+*.json
+*.txt
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+venv/
+env/
+.env
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Pytest cache
+.pytest_cache/
+
+# Temporary directories
+tmp/
+temp/

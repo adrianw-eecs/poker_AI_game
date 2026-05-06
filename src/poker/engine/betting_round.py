@@ -1,10 +1,11 @@
 """Single street betting round orchestration."""
 
+import time
 from collections.abc import Callable
 from dataclasses import replace
 
 from poker.domain.action import Action, ActionType
-from poker.logging.events import ActionTaken
+from poker.logging.events import ActionTaken, TimingEvent
 from poker.logging.logger import Logger
 from poker.state.game_state import GameState
 
@@ -62,7 +63,15 @@ class BettingRound:
                 break
 
             seat = self.state.action_on_seat
+            t0 = time.perf_counter()
             action = self.get_action(seat, self.state)
+            elapsed_us = int((time.perf_counter() - t0) * 1_000_000)
+            self.logger.log_event(TimingEvent(
+                phase="bot_action",
+                seat=seat,
+                elapsed_us=elapsed_us,
+                hand_number=self.state.hand_number,
+            ))
 
             # Track this player as having acted this round
             self.players_acted_this_round.add(seat)
@@ -257,6 +266,18 @@ class BettingRound:
         """
         num_players = len(state.players)
         next_seat = (current_seat + 1) % num_players
+
+        # Count how many players can act (not folded, not eliminated, not all-in)
+        can_act_count = 0
+        for i in range(num_players):
+            player = state.players[i]
+            if not player.has_folded and not player.is_eliminated and not player.is_all_in:
+                can_act_count += 1
+
+        # If only 1 or fewer players can act, betting round should close
+        # Return None to signal no more actions needed
+        if can_act_count <= 1:
+            return replace(state, action_on_seat=None)
 
         # Skip players until we find one who can act
         attempts = 0
