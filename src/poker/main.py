@@ -171,6 +171,19 @@ def main() -> int:
         help="Enable run-it-twice for all-in situations",
     )
 
+    # Rebuy options
+    parser.add_argument(
+        "--rebuy",
+        action="store_true",
+        help="Enable automatic rebuy when players hit 0 chips",
+    )
+    parser.add_argument(
+        "--rebuy-stack",
+        type=int,
+        default=None,
+        help="Stack amount to rebuy to (default: starting stack)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -201,7 +214,10 @@ def main() -> int:
 
         # Create session config
         session_config = SessionConfig(
-            duration_hands=args.hands, duration_seconds=args.time
+            duration_hands=args.hands,
+            duration_seconds=args.time,
+            rebuy_enabled=args.rebuy,
+            rebuy_stack=args.rebuy_stack
         )
 
         # Create logger

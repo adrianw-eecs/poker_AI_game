@@ -135,7 +135,9 @@ checkpoints/
 games/
 test.jsonl
 data/
-models/
+*.pkl
+*.pt
+*.pth
 
 # Corrupted path artifacts (from path parsing errors)
 D:Claude_Projectspokersrcpokerengine/

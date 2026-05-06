@@ -21,10 +21,14 @@ class SessionConfig:
     Attributes:
         duration_hands: Maximum number of hands to play (or None for unlimited).
         duration_seconds: Maximum session duration in seconds (or None for unlimited).
+        rebuy_enabled: Enable automatic rebuy when players hit 0 chips (default False).
+        rebuy_stack: Stack amount to rebuy to (default to starting_stack if None).
     """
 
     duration_hands: int | None = None
     duration_seconds: float | None = None
+    rebuy_enabled: bool = False
+    rebuy_stack: int | None = None
 
 
 @dataclass
@@ -220,6 +224,27 @@ class Session:
 
         return False
 
+    def _apply_rebuys(self, state: GameState) -> GameState:
+        """Reset eliminated players' stacks to starting_stack (rebuy).
+
+        Args:
+            state: Current game state.
+
+        Returns:
+            Updated game state with rebuyed players.
+        """
+        if not self.session_config.rebuy_enabled:
+            return state
+
+        players_list = list(state.players)
+        for seat in range(len(state.players)):
+            player = state.players[seat]
+            if player.is_eliminated and player.stack == 0:
+                rebuy_amount = self.session_config.rebuy_stack or self.config.starting_stack
+                players_list[seat] = player.with_stack(rebuy_amount).with_eliminated(False)
+
+        return replace(state, players=tuple(players_list))
+
     def run(
         self,
         state: GameState,
@@ -252,6 +277,10 @@ class Session:
             # Check if session should end
             if self.is_session_over(state, time.time() - start_time):
                 break
+
+            # Apply rebuys before advancing to next hand
+            if self.session_config.rebuy_enabled:
+                state = self._apply_rebuys(state)
 
             # Advance to next hand
             state = self.advance_to_next_hand(state)
