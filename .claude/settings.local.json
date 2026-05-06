@@ -61,7 +61,9 @@
       "Bash(git init *)",
       "Bash(git remote *)",
       "Bash(git branch *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(git rm *)"
     ],
     "deny": [
       "Bash(rm -rf *)",
