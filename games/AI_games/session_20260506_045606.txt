@@ -1,0 +1,44 @@
+=== POKER SESSION TRANSCRIPT ===
+Created: 2026-05-06 04:56:06
+
+============================================================
+Hand #1 started | dealer_seat=0 | blinds=5/10
+============================================================
+
+[End of PREFLOP]
+=== Hand #1 | Street: PREFLOP ===
+Board: [ - ]
+Pot: 20
+To call: 10
+
+Players:
+  [BTN/SB ] Player1      stack=  990 committed(hand=10, street=10) [?? ??]
+  [BB     ] Player2      stack=  990 committed(hand=10, street=10) [?? ??]
+
+Action this street:
+  - Player1 (seat 0): CALL 10
+  - Player2 (seat 1): CALL 10
+[End of FLOP]
+=== Hand #1 | Street: FLOP ===
+Board: [ J♠ 8♣ 7♣ ]
+Pot: 20
+
+Players:
+  [BTN/SB ] Player1      stack=  990 committed(hand=10, street=0) [?? ??]
+  [BB     ] Player2      stack=  990 committed(hand=10, street=0) [?? ??] (FOLDED)
+
+Action this street:
+  - Player2 (seat 1): FOLD
+[End of SHOWDOWN]
+=== Hand #1 | Street: SHOWDOWN ===
+Board: [ J♠ 8♣ 7♣ ]
+Pot: 20
+
+Players:
+  [BTN/SB ] Player1      stack=  990 committed(hand=10, street=0) [T♥ T♦]
+  [BB     ] Player2      stack=  990 committed(hand=10, street=0) [K♣ 2♠] (FOLDED)
+
+Action this street:
+  - Player2 (seat 1): FOLD
+Hand ended | chip_distribution: seat0=20 seat1=0
+

@@ -1,0 +1,118 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "poker"
+version = "0.1.0"
+description = "No-Limit Texas Hold'em poker engine with ML self-play environment"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Claude Code", email = "claude@anthropic.com" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "hypothesis>=6.82.0",
+    "gymnasium>=0.29.0",
+]
+ml = [
+    "gymnasium>=0.29.0",
+    "torch>=2.0.0",
+    "tensorboard>=2.14.0",
+]
+
+[project.urls]
+Repository = "https://github.com/your-org/poker"
+Documentation = "https://github.com/your-org/poker"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/poker"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "--strict-markers --tb=short"
+markers = [
+    "smoke: fast integration tests (<30s) — run on code changes",
+    "integration: full integration scenarios",
+    "slow: slow tests (>10s each)",
+]
+
+[tool.coverage.run]
+source = ["src/poker"]
+branch = true
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+fail_under = 90
+# Relaxed threshold for ml/ and logging/ which are harder to fully cover in tests
+# but core/ and evaluation/ should be at 95%
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unreachable = true
+disallow_any_explicit = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Tests can be more lenient with typing
+disallow_any_explicit = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # Pyflakes
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+    "SIM105", # Use contextlib.suppress (we prefer explicit try/except)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]  # Allow unused imports in __init__.py
+"tests/**" = ["F841"]  # Allow unused variables in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["poker"]

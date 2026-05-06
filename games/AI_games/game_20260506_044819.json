@@ -1,0 +1,22 @@
+{
+  "session_id": "2026-05-06T04:48:19.392919",
+  "hand_count": 1,
+  "players": [
+    {
+      "seat": 0,
+      "name": "RandomBot1",
+      "is_eliminated": false,
+      "final_stack": 1948
+    },
+    {
+      "seat": 1,
+      "name": "RandomBot2",
+      "is_eliminated": true,
+      "final_stack": 0
+    }
+  ],
+  "final_stacks": {
+    "0": 1948,
+    "1": 0
+  }
+}
