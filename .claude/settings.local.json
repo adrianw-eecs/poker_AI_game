@@ -91,8 +91,6 @@
       "Bash(chmod 777 *)",
       "Bash(chmod -R *)",
       "Bash(chown -R *)",
-      "Bash(git push --force *)",
-      "Bash(git push -f *)",
       "Bash(git reset --hard *)",
       "Bash(git clean -fd *)",
       "Bash(git branch -D *)",
