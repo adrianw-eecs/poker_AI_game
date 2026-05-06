@@ -1,10 +1,23 @@
 """Game configuration."""
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import cast
 
 from poker.config.blind_schedule import BlindSchedule
 from poker.exceptions import ConfigError
+
+
+class TournamentMode(Enum):
+    """Tournament game mode.
+
+    Attributes:
+        SNG: Sit-n-Go tournament.
+        MTT: Multi-Table Tournament.
+    """
+
+    SNG = "sng"
+    MTT = "mtt"
 
 
 @dataclass(frozen=True)
@@ -21,6 +34,8 @@ class GameConfig:
         rake_cap: Maximum rake in chips per pot, or None for uncapped.
         blind_schedule: The blind schedule (escalating or fixed).
         run_it_twice: Whether to enable run-it-twice for all-in situations.
+        tournament_mode: Tournament mode (SNG, MTT) or None for cash game.
+        final_table_size: Number of players for final table notification in MTT (default 9).
     """
 
     num_players: int
@@ -32,6 +47,8 @@ class GameConfig:
     rake_cap: int | None
     blind_schedule: BlindSchedule
     run_it_twice: bool = False
+    tournament_mode: TournamentMode | None = None
+    final_table_size: int = 9
 
     def __post_init__(self) -> None:
         """Validate game configuration."""
