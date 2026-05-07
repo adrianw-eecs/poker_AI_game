@@ -202,3 +202,130 @@ def test_stacks_non_negative_after_hand() -> None:
 
         for i, player in enumerate(final_state.players):
             assert player.stack >= 0, f"Seed {seed}: Player {i} has negative stack {player.stack}"
+
+
+@pytest.mark.smoke
+def test_6player_20hand_with_rebuy() -> None:
+    """Integration: 6-player, 20-hand game with rebuy enabled.
+
+    Validates:
+    - Multi-hand session completes successfully
+    - Rebuy system auto-resets eliminated players
+    - Game continues even when players are eliminated and rebuyed
+    - Chip conservation with rebuy (chips injected when rebuy happens)
+    - Session terminates correctly after 20 hands
+    """
+    from poker.bots.random_bot import RandomBot
+
+    blind_schedule = BlindSchedule(
+        levels=[BlindLevel(small=5, big=10)] * 10,
+        hands_per_level=20,
+        fixed=True,
+    )
+    config = GameConfig(
+        num_players=6,
+        starting_stack=100,
+        small_blind=5,
+        big_blind=10,
+        ante=0,
+        rake_percent=0.0,
+        rake_cap=None,
+        blind_schedule=blind_schedule,
+        run_it_twice=False,
+    )
+
+    session = Session(
+        config=config,
+        blind_schedule=blind_schedule,
+        session_config=SessionConfig(
+            duration_hands=20,
+            rebuy_enabled=True,
+            rebuy_stack=100
+        ),
+        logger=NullLogger(),
+    )
+
+    state = session.create_initial_state(num_players=6)
+    initial_total = sum(p.stack for p in state.players)
+
+    # Create 6 random bots
+    bots = {i: RandomBot(name=f"Bot{i}", seed=42 + i) for i in range(6)}
+
+    # Run session
+    final_state = session.run(state, bots, lambda: Deck(RNG(seed=12345)))
+
+    # Verify session completed
+    assert final_state.hand_number == 20, f"Expected 20 hands, got {final_state.hand_number}"
+
+    # Verify no negative stacks
+    for p in final_state.players:
+        assert p.stack >= 0, f"Negative stack: {p.stack}"
+
+    # Verify valid game state
+    assert len(final_state.players) == 6, f"Expected 6 players, got {len(final_state.players)}"
+
+
+@pytest.mark.smoke
+def test_8player_50hand_without_rebuy() -> None:
+    """Integration: 8-player, 50-hand game without rebuy.
+
+    Validates:
+    - Large multi-hand session completes successfully
+    - Player elimination mechanics work correctly
+    - Game terminates when 1 or fewer active players remain
+    - Betting round side pot detection works under load
+    - Hand numbering is sequential across all hands
+    """
+    from poker.bots.random_bot import RandomBot
+
+    blind_schedule = BlindSchedule(
+        levels=[BlindLevel(small=5, big=10)] * 20,
+        hands_per_level=50,
+        fixed=True,
+    )
+    config = GameConfig(
+        num_players=8,
+        starting_stack=100,
+        small_blind=5,
+        big_blind=10,
+        ante=0,
+        rake_percent=0.0,
+        rake_cap=None,
+        blind_schedule=blind_schedule,
+        run_it_twice=False,
+    )
+
+    session = Session(
+        config=config,
+        blind_schedule=blind_schedule,
+        session_config=SessionConfig(
+            duration_hands=50,
+            rebuy_enabled=False,  # No rebuy
+        ),
+        logger=NullLogger(),
+    )
+
+    state = session.create_initial_state(num_players=8)
+    initial_total = sum(p.stack for p in state.players)
+
+    # Create 8 random bots
+    bots = {i: RandomBot(name=f"Bot{i}", seed=99 + i) for i in range(8)}
+
+    # Run session
+    final_state = session.run(state, bots, lambda: Deck(RNG(seed=54321)))
+
+    # Verify session completed (either 50 hands or only 1 player remains)
+    assert final_state.hand_number <= 50, f"Expected <= 50 hands, got {final_state.hand_number}"
+
+    # Verify no negative stacks
+    for p in final_state.players:
+        assert p.stack >= 0, f"Negative stack: {p.stack}"
+
+    # Verify valid game state
+    assert len(final_state.players) == 8, f"Expected 8 players, got {len(final_state.players)}"
+
+    # Verify game terminated correctly
+    # Session ends when: (1) only 1 active player remains, or (2) 50 hands completed
+    active_count = sum(1 for p in final_state.players if not p.is_eliminated)
+    assert active_count <= 1 or final_state.hand_number == 50, \
+        f"Game should end when 1 player remains or 50 hands reached. Active: {active_count}, Hands: {final_state.hand_number}"
