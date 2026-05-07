@@ -255,6 +255,24 @@ def main() -> int:
                 bots[seat] = HumanBot(seat=seat)
             elif bot_type == "flop_bot":
                 bots[seat] = FlopBot(name=f"FlopBot{seat + 1}")
+            elif bot_type == "linear_bot":
+                from poker.bots.linear_bot import LinearBot
+                from poker.ml.models.linear_q import LinearQModel
+                model = LinearQModel()
+                model.load("models/linear_q.pkl")
+                bots[seat] = LinearBot(name=f"LinearBot{seat + 1}", model=model)
+            elif bot_type == "deep_bot":
+                from poker.bots.deep_bot import DeepBot
+                from poker.ml.models.deep_q import DeepQModel
+                model = DeepQModel()
+                model.load("models/deep_q.pt")
+                bots[seat] = DeepBot(name=f"DeepBot{seat + 1}", model=model)
+            elif bot_type == "tree_bot":
+                from poker.bots.tree_bot import TreeBot
+                from poker.ml.models.tree_q import TreeQModel
+                model = TreeQModel()
+                model.load("models/tree_q.pkl")
+                bots[seat] = TreeBot(name=f"TreeBot{seat + 1}", model=model)
             else:  # default to random
                 bots[seat] = RandomBot(name=f"RandomBot{seat + 1}")
 

@@ -10,6 +10,13 @@ import torch.optim as optim
 
 from poker.state.game_state import GameState
 
+# Check for mixed precision support (available in CUDA-capable GPUs)
+try:
+    from torch.cuda.amp import autocast, GradScaler
+    HAS_AMP = True
+except ImportError:
+    HAS_AMP = False
+
 
 class QNetwork(nn.Module):
     """Neural network for Q-value prediction.
@@ -74,6 +81,16 @@ class DeepQModel:
         self.loss_fn = nn.MSELoss()
         self.is_fitted = False
 
+        # Mixed precision training support for NVIDIA GPUs (RTX 3080)
+        self.use_amp = HAS_AMP and torch.cuda.is_available()
+        if self.use_amp:
+            self.scaler = GradScaler()
+            if torch.cuda.is_available():
+                print(f"Using mixed precision training on {torch.cuda.get_device_name(0)}")
+
+        # Cache for single prediction to avoid repeated tensor creation
+        self._x_cache: torch.Tensor | None = None
+
     def fit(
         self,
         X: npt.NDArray[np.float32],
@@ -83,7 +100,7 @@ class DeepQModel:
         epochs: int = 100,
         batch_size: int = 16,
     ) -> None:
-        """Train the model on collected data.
+        """Train the model on collected data with mixed precision support.
 
         Args:
             X: Feature matrix of shape (N, 15).
@@ -93,21 +110,23 @@ class DeepQModel:
             epochs: Number of training epochs (default 100).
             batch_size: Batch size for training (default 16).
         """
+        # Transfer to GPU with optimal dtypes
         X_tensor = torch.FloatTensor(X).to(self.device)
         actions_tensor = torch.LongTensor(actions).to(self.device)
         rewards_tensor = torch.FloatTensor(rewards).to(self.device)
 
-        # Convert to dataset for batching
         num_samples = len(X)
+        self.network.train()
+
         for epoch in range(epochs):
-            # Shuffle indices
+            # Shuffle indices for mini-batch training
             indices = np.arange(num_samples)
             np.random.shuffle(indices)
 
             epoch_loss = 0.0
             num_batches = 0
 
-            # Train on batches
+            # Train on batches with mixed precision
             for batch_start in range(0, num_samples, batch_size):
                 batch_end = min(batch_start + batch_size, num_samples)
                 batch_indices = indices[batch_start:batch_end]
@@ -116,29 +135,41 @@ class DeepQModel:
                 actions_batch = actions_tensor[batch_indices]
                 rewards_batch = rewards_tensor[batch_indices]
 
-                # Forward pass
-                q_values = self.network(X_batch)
-
-                # Compute loss on the taken actions
-                action_q_values = q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
-                loss = self.loss_fn(action_q_values, rewards_batch)
-
-                # Backward pass
                 self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+
+                # Use mixed precision (fp16) for forward pass on NVIDIA GPUs
+                if self.use_amp:
+                    with autocast(dtype=torch.float16):
+                        q_values = self.network(X_batch)
+                        action_q_values = q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
+                        loss = self.loss_fn(action_q_values, rewards_batch)
+
+                    # Scale loss and backward pass
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Fallback to fp32 training on CPU or non-CUDA devices
+                    q_values = self.network(X_batch)
+                    action_q_values = q_values.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
+                    loss = self.loss_fn(action_q_values, rewards_batch)
+
+                    loss.backward()
+                    self.optimizer.step()
 
                 epoch_loss += loss.item()
                 num_batches += 1
 
             if (epoch + 1) % 20 == 0:
                 avg_loss = epoch_loss / num_batches
-                print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.6f}")
+                device_info = f" on {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else ""
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.6f}{device_info}")
 
+        self.network.eval()
         self.is_fitted = True
 
     def predict_q_values(self, X: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-        """Predict Q-values for all actions.
+        """Predict Q-values for all actions with GPU optimization.
 
         Args:
             X: Feature matrix of shape (N, 15) or (15,).
@@ -154,19 +185,28 @@ class DeepQModel:
 
         self.network.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X).to(self.device)
-            if X.ndim == 1:
-                X_tensor = X_tensor.unsqueeze(0)
-                q_values = self.network(X_tensor).squeeze(0)
+            # Use fp16 on GPU for faster inference (RTX 3080 Tensor Core optimization)
+            if torch.cuda.is_available() and self.use_amp:
+                with autocast(dtype=torch.float16):
+                    X_tensor = torch.FloatTensor(X).to(self.device)
+                    if X.ndim == 1:
+                        q_values = self.network(X_tensor.unsqueeze(0)).squeeze(0)
+                    else:
+                        q_values = self.network(X_tensor)
             else:
-                q_values = self.network(X_tensor)
+                X_tensor = torch.FloatTensor(X).to(self.device)
+                if X.ndim == 1:
+                    q_values = self.network(X_tensor.unsqueeze(0)).squeeze(0)
+                else:
+                    q_values = self.network(X_tensor)
 
-            return q_values.cpu().numpy().astype(np.float32)
+            # Convert back to numpy with minimal overhead
+            return q_values.float().cpu().numpy().astype(np.float32)
 
     def predict_best_action(
         self, X: npt.NDArray[np.float32], mask: npt.NDArray[np.int32] | None = None
     ) -> int:
-        """Predict best action given features.
+        """Predict best action given features with efficient masking.
 
         Args:
             X: Feature vector of shape (15,).
@@ -176,13 +216,13 @@ class DeepQModel:
             Best legal action index.
         """
         q_values = self.predict_q_values(X)
+
         if mask is None:
-            mask = np.ones(self.num_actions, dtype=np.int32)
+            # Fast path: no masking needed
+            return int(np.argmax(q_values))
 
-        # Mask illegal actions (set to very negative value)
-        masked_q = q_values.copy()
-        masked_q[mask == 0] = -np.inf
-
+        # Apply mask using vectorized where operation (more efficient than copy + assignment)
+        masked_q = np.where(mask, q_values, -np.inf)
         return int(np.argmax(masked_q))
 
     def save(self, filepath: str) -> None:

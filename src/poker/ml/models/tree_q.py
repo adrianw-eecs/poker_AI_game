@@ -47,6 +47,7 @@ class TreeQModel:
             legal_masks: Optional legal action masks of shape (N, 7).
                         Only train on legal actions if provided.
         """
+        self.fitted_actions = set()
         for action in range(self.num_actions):
             # Get indices where this action was taken (and legal if mask provided)
             action_mask = actions == action
@@ -57,6 +58,7 @@ class TreeQModel:
                 X_action = X[action_mask]
                 y_action = rewards[action_mask]
                 self.models[action].fit(X_action, y_action)
+                self.fitted_actions.add(action)
 
         self.is_fitted = True
 
@@ -81,7 +83,9 @@ class TreeQModel:
 
         q_values = np.zeros((X.shape[0], self.num_actions), dtype=np.float32)
         for action in range(self.num_actions):
-            q_values[:, action] = self.models[action].predict(X).astype(np.float32)
+            if action in getattr(self, 'fitted_actions', set(range(self.num_actions))):
+                q_values[:, action] = self.models[action].predict(X).astype(np.float32)
+            # else: leave as 0 for unfitted actions
 
         if single_input:
             q_values = q_values[0]
@@ -102,12 +106,12 @@ class TreeQModel:
         """
         q_values = self.predict_q_values(X)
         if mask is None:
-            mask = np.ones(self.num_actions, dtype=np.int32)
+            # Fast path: no masking needed
+            return int(np.argmax(q_values))
 
-        # Mask illegal actions (set to very negative value)
-        masked_q = q_values.copy()
-        masked_q[mask == 0] = -np.inf
-
+        # Apply mask in-place using vectorized where operation
+        # More efficient than copy + assignment pattern
+        masked_q = np.where(mask, q_values, -np.inf)
         return int(np.argmax(masked_q))
 
     def save(self, filepath: str) -> None:
@@ -119,7 +123,7 @@ class TreeQModel:
         import pickle
 
         with open(filepath, "wb") as f:
-            pickle.dump((self.models, self.num_actions, self.max_depth, self.is_fitted), f)
+            pickle.dump((self.models, self.num_actions, self.max_depth, self.is_fitted, getattr(self, 'fitted_actions', set())), f)
         print(f"Saved TreeQModel to {filepath}")
 
     def load(self, filepath: str) -> None:
@@ -131,5 +135,11 @@ class TreeQModel:
         import pickle
 
         with open(filepath, "rb") as f:
-            self.models, self.num_actions, self.max_depth, self.is_fitted = pickle.load(f)
+            data = pickle.load(f)
+            if len(data) == 4:
+                # Old format without fitted_actions
+                self.models, self.num_actions, self.max_depth, self.is_fitted = data
+                self.fitted_actions = set(range(self.num_actions))
+            else:
+                self.models, self.num_actions, self.max_depth, self.is_fitted, self.fitted_actions = data
         print(f"Loaded TreeQModel from {filepath}")
