@@ -99,6 +99,16 @@ class StreetEnded:
     snapshot: str  # human-readable formatted GameState snapshot
 
 
+@dataclass(frozen=True)
+class TimingEvent:
+    """Emitted when tracking timing of game actions."""
+
+    hand_number: int
+    phase: str  # e.g., "bot_action"
+    seat: int
+    elapsed_us: int
+
+
 # Discriminated union of all event types
 Event = (
     HandStarted
@@ -111,6 +121,7 @@ Event = (
     | Showdown
     | HandEnded
     | StreetEnded
+    | TimingEvent
 )
 
 
@@ -200,6 +211,14 @@ class EventEncoder:
                 "street": event.street,
                 "snapshot": event.snapshot,
             }
+        elif isinstance(event, TimingEvent):
+            return {
+                "type": "TimingEvent",
+                "hand_number": event.hand_number,
+                "phase": event.phase,
+                "seat": event.seat,
+                "elapsed_us": event.elapsed_us,
+            }
         else:
             raise ValueError(f"Unknown event type: {type(event)}")
 
@@ -288,6 +307,13 @@ class EventEncoder:
                 hand_number=cast(int, data["hand_number"]),
                 street=cast(str, data["street"]),
                 snapshot=cast(str, data["snapshot"]),
+            )
+        elif event_type == "TimingEvent":
+            return TimingEvent(
+                hand_number=cast(int, data["hand_number"]),
+                phase=cast(str, data["phase"]),
+                seat=cast(int, data["seat"]),
+                elapsed_us=cast(int, data["elapsed_us"]),
             )
         else:
             raise ValueError(f"Unknown event type: {event_type}")
