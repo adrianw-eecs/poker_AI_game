@@ -45,6 +45,7 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 addopts = "--strict-markers --tb=short"
+pythonpath = ["src"]
 markers = [
     "smoke: fast integration tests (<30s) — run on code changes",
     "integration: full integration scenarios",

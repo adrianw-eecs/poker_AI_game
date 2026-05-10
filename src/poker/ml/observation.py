@@ -4,8 +4,100 @@ import numpy as np
 import numpy.typing as npt
 
 from poker.domain.action import ActionType
+from poker.domain.card import Card
 from poker.ml.encoder import cards_to_indices
 from poker.state.game_state import GameState, Street
+
+
+def _classify_hand_strength(hole_cards: tuple[Card, ...], community_cards: tuple[Card, ...]) -> int:
+    """Classify hand strength into buckets.
+
+    Returns bucket index [0-7]:
+    0: Unpaired, no draw
+    1: Pair, no draw
+    2: Pair + draw
+    3: Two-pair or better
+    4: Straight draw (4-card)
+    5: Flush draw (4-card)
+    6: Made straight/flush
+    7: Best hand (trips+)
+    """
+    if len(hole_cards) < 2:
+        return 0
+
+    # Count card ranks
+    all_cards = list(hole_cards) + list(community_cards)
+    ranks = [card.rank for card in all_cards]
+    from collections import Counter
+    rank_counts = Counter(ranks)
+
+    # Check for trips or better
+    if 3 in rank_counts.values() or 4 in rank_counts.values():
+        return 7
+
+    # Check for two-pair
+    if list(rank_counts.values()).count(2) >= 2:
+        return 3
+
+    # Check for pair
+    has_pair = 2 in rank_counts.values()
+
+    # Check for made straight/flush (simplified)
+    if len(community_cards) >= 3:
+        # Very simplified: just check if we have all high cards
+        high_cards = sum(1 for r in ranks if r >= 10)
+        if high_cards >= 5:
+            return 6
+
+    # Check for draws (simplified)
+    if len(community_cards) >= 3:
+        # 4-card straight draw: 4 consecutive ranks
+        unique_ranks = sorted(set(ranks))
+        for i in range(len(unique_ranks) - 3):
+            if unique_ranks[i + 3] - unique_ranks[i] == 3:
+                return 4 if not has_pair else 2
+
+        # 4-card flush draw: check suits
+        suits = [card.suit for card in all_cards]
+        from collections import Counter as SuitCounter
+        suit_counts = SuitCounter(suits)
+        if 4 in suit_counts.values():
+            return 5 if not has_pair else 2
+
+    # Pair with no draw, or unpaired
+    return 1 if has_pair else 0
+
+
+def _compute_player_aggression(state: GameState, seat: int) -> float:
+    """Compute aggression % for a specific player.
+
+    Returns aggression rate in [0, 1] where 1 = all actions are raises/all-ins.
+    """
+    actions = [a for s, a in state.action_history_this_street if s == seat]
+    if not actions:
+        return 0.0
+
+    aggressive = sum(1 for a in actions if a.type in [ActionType.RAISE, ActionType.ALL_IN])
+    return float(aggressive) / len(actions)
+
+
+def _compute_table_aggression(state: GameState, seat: int) -> float:
+    """Compute average aggression % for opponents.
+
+    Returns average aggression rate in [0, 1].
+    """
+    opponent_seats = [i for i in range(len(state.players)) if i != seat]
+    if not opponent_seats:
+        return 0.0
+
+    agg_rates = []
+    for opp_seat in opponent_seats:
+        actions = [a for s, a in state.action_history_this_street if s == opp_seat]
+        if actions:
+            agg = sum(1 for a in actions if a.type in [ActionType.RAISE, ActionType.ALL_IN])
+            agg_rates.append(float(agg) / len(actions))
+
+    return float(np.mean(agg_rates)) if agg_rates else 0.0
 
 
 def build_observation(state: GameState, seat: int) -> npt.NDArray[np.float32]:
@@ -121,8 +213,25 @@ def build_observation(state: GameState, seat: int) -> npt.NDArray[np.float32]:
 
     features.extend([pot_norm, bet_to_call_norm])
 
-    # === Pad to 139 features ===
-    # Keep last 3 features (indices 139-141) for important game state
+    # === Hand strength bucket (8 features, one-hot) ===
+    hand_strength = _classify_hand_strength(player.hole_cards, state.community_cards)
+    hand_encoding = [0.0] * 8
+    hand_encoding[min(hand_strength, 7)] = 1.0
+    features.extend(hand_encoding)
+
+    # === SPR - Stack-to-Pot Ratio (1 feature) ===
+    spr = (player.stack / max(pot_amount, 1.0)) if pot_amount > 0 else 1.0
+    spr_norm = np.log(spr + 1.0) / np.log(100.0)  # Log-scale, cap at 100:1
+    features.append(float(np.clip(spr_norm, 0.0, 1.0)))
+
+    # === Aggression metrics (4 features) ===
+    own_agg = _compute_player_aggression(state, seat)
+    opp_agg = _compute_table_aggression(state, seat)
+    features.extend([own_agg, opp_agg, 0.0, 0.0])  # Last 2 are spare for future use
+
+    # === Pad to required size ===
+    # Current size = 2 + 5 + 18 + 36 + 9 + 5 + 4 + 2 + 8 + 1 + 4 = 94
+    # Add back the earlier action history padding
     target_size_before_final = 139
     while len(features) < target_size_before_final:
         features.append(0.0)
@@ -140,8 +249,8 @@ def build_observation(state: GameState, seat: int) -> npt.NDArray[np.float32]:
     sb_norm = float(state.blind_level.small) / max_stack
     features.append(sb_norm)
 
-    # === Final pad to exactly 142 ===
-    target_size = 142
+    # === Final pad to exactly 155 (142 + 13 new features) ===
+    target_size = 155
     while len(features) < target_size:
         features.append(0.0)
 
@@ -156,5 +265,6 @@ def observation_spec() -> tuple[tuple[int, ...], str]:
 
     Returns:
         A tuple of (shape, dtype_name) for gym/gymnasium compatibility.
+        Enhanced from 142 to 155 features (added hand strength, SPR, aggression).
     """
-    return ((142,), "float32")
+    return ((155,), "float32")
