@@ -273,6 +273,18 @@ def main() -> int:
                 model = TreeQModel()
                 model.load("models/tree_q.pkl")
                 bots[seat] = TreeBot(name=f"TreeBot{seat + 1}", model=model)
+            elif bot_type == "nfsp_bot":
+                from poker.bots.nfsp_bot import NFSPBot
+                from poker.ml.models.nfsp_model import NFSPModel
+                model = NFSPModel()
+                model.load("models/nfsp.pt")
+                bots[seat] = NFSPBot(name=f"NFSPBot{seat + 1}", model=model)
+            elif bot_type == "sdcfr_bot":
+                from poker.bots.sdcfr_bot import SDCFRBot
+                from poker.ml.models.sdcfr_model import SDCFRModel
+                model = SDCFRModel()
+                model.load("models/sdcfr.pt")
+                bots[seat] = SDCFRBot(name=f"SDCFRBot{seat + 1}", model=model)
             else:  # default to random
                 bots[seat] = RandomBot(name=f"RandomBot{seat + 1}")
 

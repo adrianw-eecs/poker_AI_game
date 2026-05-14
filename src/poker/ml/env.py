@@ -30,10 +30,12 @@ class PokerEnv(gym.Env):
     """Gymnasium-compatible Texas Hold'em poker environment.
 
     This environment provides:
-    - Fixed-length observation vectors (142 features) for each player
+    - Fixed-length observation vectors (155 features) for each player
+      * Original 142 features (cards, stacks, positions, action history, etc.)
+      * Enhanced with: hand strength bucket (8), SPR (1), aggression metrics (4)
     - Discrete action space (7 actions: fold, check/call, 5 raise buckets)
     - Legal action masking to prevent illegal moves
-    - Rewards based on stack changes (normalized by starting stack)
+    - Dense reward shaping (equity bonuses during hand + stack delta at end)
     - Support for multi-player, variable player count games
 
     Each step represents one player action (not a full hand).
@@ -116,13 +118,14 @@ class PokerEnv(gym.Env):
         # Action and observation spaces
         self.action_space = spaces.Discrete(7)
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(142,), dtype=np.float32
+            low=0.0, high=1.0, shape=(155,), dtype=np.float32
         )
 
         # Environment state
         self.state: GameState | None = None
         self.hand_number = 0
         self.player_stacks_at_hand_start: dict[int, int] = {}
+        self.prev_equity: float = 0.5  # For equity delta shaping
         self.render_mode = render_mode
         self.rng = np.random.Generator(np.random.PCG64(seed))
         self.logger = NullLogger()  # Silent logging
@@ -197,6 +200,9 @@ class PokerEnv(gym.Env):
 
         # Store stacks at the start of the hand (for reward calculation)
         self.player_stacks_at_hand_start = {p.seat: p.stack for p in self.state.players}
+
+        # Initialize equity estimate for reward shaping
+        self.prev_equity = 0.5  # Neutral starting point
 
         # Get the first observation (for the learning agent)
         obs = build_observation(self.state, self.learning_seat)
@@ -324,7 +330,7 @@ class PokerEnv(gym.Env):
 
         # Compute reward and next observation
         reward = self._compute_reward(self.learning_seat)
-        obs = np.zeros(142, dtype=np.float32)
+        obs = np.zeros(155, dtype=np.float32)
         if not hand_ended and self.state.action_on_seat == self.learning_seat:
             obs = build_observation(self.state, self.learning_seat)
 
@@ -512,27 +518,99 @@ class PokerEnv(gym.Env):
         # For now, just return state as-is; actual reward will reflect stack changes
         return state
 
-    def _compute_reward(self, seat: int) -> float:
-        """Compute reward for a player.
+    def _estimate_hand_equity(self, obs: npt.NDArray[np.float32]) -> float:
+        """Estimate hand equity from observation features.
 
-        Reward is 0 mid-hand, stack change at hand end, normalized by starting_stack.
+        Uses a simple heuristic: hole card strength + community card strength.
+        Returns value in [0, 1] where 0.5 = break-even vs random.
+
+        Args:
+            obs: Observation vector (142 dims)
+
+        Returns:
+            Estimated equity in [0, 1]
+        """
+        # Extract hole card indices (first 2 elements, normalized to [0, 1])
+        card1_val = float(obs[0])
+        card2_val = float(obs[1])
+        card_strength = (card1_val + card2_val) / 2.0
+
+        # Community cards (elements 2-7, 5 cards normalized to [0, 1])
+        community_vals = obs[2:7]
+        community_strength = float(np.mean(community_vals)) if len(community_vals) > 0 else 0.5
+
+        # Blended estimate: more weight to hole cards early, more to community later
+        hand_equity = 0.6 * card_strength + 0.4 * community_strength
+
+        # Clamp to [0, 1]
+        return float(np.clip(hand_equity, 0.0, 1.0))
+
+    def _compute_reward(self, seat: int) -> float:
+        """Compute reward for a player with dense reward shaping.
+
+        During hand: intrinsic reward from equity improvement + stack penalties
+        At hand end: extrinsic reward from stack change
 
         Args:
             seat: The seat of the player.
 
         Returns:
-            Normalized stack change.
+            Total reward combining intrinsic and extrinsic signals.
         """
         if self.state is None:
             return 0.0
 
-        # Reward is the stack change from hand start
+        player = self.state.players[seat]
         stack_before = self.player_stacks_at_hand_start.get(seat, self.starting_stack)
-        stack_after = self.state.players[seat].stack
-        stack_change = stack_after - stack_before
+        stack_change = player.stack - stack_before
 
-        # Normalize by starting stack
-        return float(stack_change) / self.starting_stack
+        # Check if hand is still ongoing (not all opponents folded/eliminated)
+        active_players = sum(1 for p in self.state.players if not p.has_folded and not p.is_eliminated)
+        is_hand_ended = active_players <= 1
+
+        reward = 0.0
+
+        # Intrinsic reward during hand: equity bonus shaping
+        if not is_hand_ended and self.state.street != Street.SHOWDOWN:
+            # Estimate current hand strength
+            try:
+                obs = build_observation(self.state, seat)
+                current_equity = self._estimate_hand_equity(obs)
+                equity_delta = current_equity - self.prev_equity
+
+                # FIX 3: Boost intrinsic reward 5x (0.01 → 0.05)
+                # This makes during-hand progress signals matter more
+                intrinsic_reward = 0.05 * equity_delta
+                reward += intrinsic_reward
+
+                # Update previous equity for next step
+                self.prev_equity = current_equity
+            except Exception:
+                # Fallback if observation building fails
+                pass
+
+            # Short-stack penalty (encourage stack preservation)
+            big_blind = self.state.config.big_blind
+            if player.stack < 3 * big_blind:
+                reward -= 0.02  # Small penalty for being short-stacked
+
+        else:
+            # Extrinsic reward at hand end
+            # Reset equity for next hand
+            self.prev_equity = 0.5
+
+            # Main reward: stack change
+            # FIX 1: Scale reward 10x (optimal signal-to-noise ratio)
+            # This makes win/loss differences visible to the network
+            normalized_change = float(stack_change) / self.starting_stack
+            reward = 10.0 * normalized_change  # 10x amplification
+
+            # Bonus for winning pot (positive result)
+            if stack_change > 0:
+                # Small additional bonus (also scaled)
+                reward += 0.2 * min(normalized_change, 0.1)
+
+        return reward
 
     def _get_info(self) -> dict[str, Any]:
         """Get info dictionary for this step.

@@ -1,0 +1,579 @@
+============================================================
+BENCHMARK RESULTS — NFSP Bot
+============================================================
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 8[91m♦[0m J[30m♠[0m 5[30m♠[0m ]
+
+  Player1              (BTN     ): [Q[30m♠[0m A[91m♦[0m]  -> High card, Ace, Queen, Jack  (WINNER: +538)
+  Player2              (SB      ): [T[30m♣[0m A[30m♠[0m]  -> folded
+  Player3              (BB      ): [4[91m♥[0m 2[30m♠[0m]  -> folded
+  Player4              (UTG     ): [2[30m♣[0m K[91m♥[0m]  -> folded
+
+  Hand result: Player1 wins 538 chips
+  Hand result: Player2 loses 508 chips
+  Hand result: Player3 loses 10 chips
+  Hand result: Player4 loses 20 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 8[30m♠[0m J[30m♠[0m 5[91m♥[0m 8[91m♦[0m K[91m♦[0m ]
+
+  Player1              (UTG     ): [2[30m♣[0m T[91m♦[0m]  -> folded
+  Player2              (BTN     ): [4[91m♥[0m 9[30m♣[0m]  -> Pair of Eights
+  Player3              (SB      ): [6[91m♦[0m K[30m♣[0m]  -> folded
+  Player4              (BB      ): [2[91m♥[0m 5[30m♣[0m]  -> Two pair, Eights and Fives  (WINNER: +968)
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 loses 201 chips
+  Hand result: Player3 loses 767 chips
+  Hand result: Player4 wins 968 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: (hand ended early - no board)
+
+  Player1              (BB      ): [J[30m♠[0m 2[91m♥[0m]  -> folded
+  Player2              (UTG     ): [4[30m♣[0m 7[91m♥[0m]  -> folded
+  Player3              (BTN     ): [6[91m♥[0m 9[30m♠[0m]  -> folded
+  Player4              (SB      ): [5[30m♣[0m Q[30m♠[0m]  -> no showdown  (WINNER: +359)
+
+  Hand result: Player1 loses 214 chips
+  Hand result: Player2 breaks even
+  Hand result: Player3 loses 145 chips
+  Hand result: Player4 wins 359 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 7[91m♥[0m 2[91m♥[0m 7[91m♦[0m ]
+
+  Player1              (SB      ): [T[30m♣[0m 8[30m♠[0m]  -> folded
+  Player2              (BB      ): [5[91m♦[0m 6[30m♠[0m]  -> folded
+  Player3              (UTG     ): [K[91m♥[0m 8[91m♦[0m]  -> folded
+  Player4              (BTN     ): [J[91m♦[0m Q[91m♦[0m]  -> Pair of Sevens  (WINNER: +89)
+
+  Hand result: Player1 loses 15 chips
+  Hand result: Player2 loses 10 chips
+  Hand result: Player3 loses 64 chips
+  Hand result: Player4 wins 89 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 6[91m♦[0m A[91m♥[0m T[91m♥[0m K[91m♥[0m 4[30m♠[0m ]
+
+  Player1              (BTN     ): [A[30m♣[0m 2[30m♠[0m]  -> folded
+  Player2              (SB      ): [8[91m♥[0m 2[91m♦[0m]  -> folded
+  Player3              (BB      ): [7[30m♣[0m 9[91m♦[0m]  -> High card, Ace, King, Ten
+  Player4              (UTG     ): [4[91m♦[0m T[91m♦[0m]  -> Two pair, Tens and Fours  (WINNER: +142)
+
+  Hand result: Player1 loses 20 chips
+  Hand result: Player2 loses 108 chips
+  Hand result: Player3 loses 14 chips
+  Hand result: Player4 wins 142 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ A[30m♣[0m 2[91m♥[0m 7[91m♦[0m 9[91m♥[0m 3[30m♣[0m ]
+
+  Player1              (UTG     ): [2[30m♠[0m 4[30m♠[0m]  -> Pair of Twos  (WINNER: +510)
+  Player2              (BTN     ): [A[30m♠[0m 6[30m♠[0m]  -> folded
+  Player3              (SB      ): [5[30m♣[0m Q[30m♠[0m]  -> High card, Ace, Queen, Nine
+  Player4              (BB      ): [4[91m♥[0m 2[30m♣[0m]  -> Pair of Twos  (WINNER: +510)
+
+  Hand result: Player1 wins 510 chips
+  Hand result: Player2 loses 20 chips
+  Hand result: Player3 loses 1000 chips
+  Hand result: Player4 wins 510 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ A[30m♠[0m 6[91m♥[0m 6[91m♦[0m T[30m♠[0m 3[30m♣[0m ]
+
+  Player1              (BB      ): [5[30m♠[0m Q[91m♦[0m]  -> folded
+  Player2              (UTG     ): [7[91m♦[0m A[91m♥[0m]  -> Two pair, Aces and Sixs
+  Player3              (BTN     ): [3[91m♥[0m 6[30m♣[0m]  -> Full house, Sixs full of Threes  (WINNER: +1163)
+  Player4              (SB      ): [5[91m♦[0m 7[30m♣[0m]  -> Pair of Sixs
+
+  Hand result: Player1 loses 10 chips
+  Hand result: Player2 loses 153 chips
+  Hand result: Player3 wins 1163 chips
+  Hand result: Player4 loses 1000 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ A[30m♣[0m 7[30m♠[0m A[91m♦[0m ]
+
+  Player1              (SB      ): [J[91m♥[0m J[91m♦[0m]  -> folded
+  Player2              (BB      ): [K[91m♦[0m 8[30m♠[0m]  -> folded
+  Player3              (UTG     ): [7[91m♦[0m 6[91m♦[0m]  -> folded
+  Player4              (BTN     ): [T[91m♥[0m 9[30m♣[0m]  -> Pair of Aces  (WINNER: +40)
+
+  Hand result: Player1 loses 20 chips
+  Hand result: Player2 loses 10 chips
+  Hand result: Player3 loses 10 chips
+  Hand result: Player4 wins 40 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 5[91m♥[0m 2[30m♠[0m 9[30m♣[0m ]
+
+  Player1              (BTN     ): [5[30m♠[0m 6[30m♣[0m]  -> folded
+  Player2              (SB      ): [8[91m♦[0m 7[30m♣[0m]  -> folded
+  Player3              (BB      ): [T[30m♣[0m J[30m♣[0m]  -> folded
+  Player4              (UTG     ): [K[91m♦[0m K[30m♣[0m]  -> Pair of Kings  (WINNER: +2736)
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 loses 990 chips
+  Hand result: Player3 loses 1746 chips
+  Hand result: Player4 wins 2736 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 3[30m♠[0m T[30m♣[0m 9[30m♣[0m ]
+
+  Player1              (UTG     ): [2[91m♥[0m 5[30m♣[0m]  -> folded
+  Player2              (BTN     ): [Q[30m♣[0m 8[30m♣[0m]  -> folded
+  Player3              (SB      ): [5[30m♠[0m 4[30m♠[0m]  -> folded
+  Player4              (BB      ): [7[91m♦[0m 7[30m♣[0m]  -> Pair of Sevens  (WINNER: +411)
+
+  Hand result: Player1 loses 20 chips
+  Hand result: Player2 breaks even
+  Hand result: Player3 loses 391 chips
+  Hand result: Player4 wins 411 chips
+
+
+  Scenario 1 — 4 players | 10 hands | rebuy ON
+  Player                   Final   Change
+  ----------------------------------------
+  NFSPBot                   1749  +   749
+  RandomBot1                1000       0
+  RandomBot2                  16    -984
+  FlopBot1                  5235  +  4235
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 3[30m♣[0m 6[91m♥[0m 8[91m♦[0m 6[91m♦[0m 5[30m♣[0m ]
+
+  Player1              (BTN     ): [4[30m♣[0m 6[30m♣[0m]  -> Three of a kind, Sixs  (WINNER: +768)
+  Player2              (SB      ): [A[91m♥[0m T[91m♦[0m]  -> folded
+  Player3              (BB      ): [3[30m♠[0m K[91m♥[0m]  -> folded
+  Player4              (UTG     ): [3[91m♥[0m J[30m♠[0m]  -> folded
+  Player5              (MP      ): [A[30m♠[0m 8[30m♣[0m]  -> folded
+  Player6              (CO      ): [2[91m♥[0m 5[30m♠[0m]  -> Two pair, Sixs and Fives
+
+  Hand result: Player1 wins 768 chips
+  Hand result: Player2 loses 5 chips
+  Hand result: Player3 loses 551 chips
+  Hand result: Player4 breaks even
+  Hand result: Player5 loses 106 chips
+  Hand result: Player6 loses 106 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ T[30m♠[0m 2[91m♦[0m Q[30m♠[0m Q[91m♦[0m J[30m♠[0m ]
+
+  Player1              (CO      ): [4[91m♦[0m K[91m♥[0m]  -> folded
+  Player2              (BTN     ): [6[30m♠[0m 3[91m♥[0m]  -> Pair of Queens  (WINNER: +293)
+  Player3              (SB      ): [8[91m♥[0m 4[30m♠[0m]  -> folded
+  Player4              (BB      ): [7[30m♠[0m K[91m♦[0m]  -> folded
+  Player5              (UTG     ): [3[30m♠[0m 9[30m♠[0m]  -> folded
+  Player6              (MP      ): [7[30m♣[0m 4[91m♥[0m]  -> folded
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 wins 293 chips
+  Hand result: Player3 loses 263 chips
+  Hand result: Player4 loses 10 chips
+  Hand result: Player5 loses 10 chips
+  Hand result: Player6 loses 10 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: (hand ended early - no board)
+
+  Player1              (MP      ): [3[30m♣[0m K[30m♣[0m]  -> folded
+  Player2              (CO      ): [4[91m♦[0m 7[91m♦[0m]  -> folded
+  Player3              (BTN     ): [T[91m♥[0m T[30m♣[0m]  -> folded
+  Player4              (SB      ): [5[30m♣[0m Q[91m♦[0m]  -> folded
+  Player5              (BB      ): [4[91m♥[0m K[91m♦[0m]  -> folded
+  Player6              (UTG     ): [8[30m♠[0m A[30m♠[0m]  -> no showdown  (WINNER: +1745)
+
+  Hand result: Player1 loses 306 chips
+  Hand result: Player2 loses 20 chips
+  Hand result: Player3 loses 163 chips
+  Hand result: Player4 loses 443 chips
+  Hand result: Player5 loses 813 chips
+  Hand result: Player6 wins 1745 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 3[91m♦[0m T[91m♦[0m 6[91m♦[0m K[91m♥[0m 3[91m♥[0m ]
+
+  Player1              (UTG     ): [J[91m♦[0m 7[91m♦[0m]  -> folded
+  Player2              (MP      ): [Q[91m♥[0m K[91m♦[0m]  -> folded
+  Player3              (CO      ): [J[30m♠[0m 2[91m♦[0m]  -> Pair of Threes, Jack kicker
+  Player4              (BTN     ): [7[30m♠[0m 8[30m♠[0m]  -> Pair of Threes, Ten kicker
+  Player5              (SB      ): [3[30m♠[0m A[91m♦[0m]  -> Three of a kind, Threes  (WINNER: +236)
+  Player6              (BB      ): [2[30m♠[0m 6[30m♠[0m]  -> Two pair, Sixs and Threes  (WINNER: +553)
+
+  Hand result: Player1 loses 262 chips
+  Hand result: Player2 breaks even
+  Hand result: Player3 loses 23 chips
+  Hand result: Player4 loses 504 chips
+  Hand result: Player5 wins 236 chips
+  Hand result: Player6 wins 553 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 2[91m♥[0m 6[30m♠[0m 7[30m♣[0m 4[30m♠[0m K[30m♣[0m ]
+
+  Player1              (BB      ): [3[91m♦[0m 2[30m♣[0m]  -> Pair of Twos, Seven kicker
+  Player2              (UTG     ): [Q[91m♦[0m 4[91m♥[0m]  -> folded
+  Player3              (MP      ): [K[91m♥[0m Q[91m♥[0m]  -> folded
+  Player4              (CO      ): [6[30m♣[0m J[30m♠[0m]  -> Pair of Sixs, Seven kicker
+  Player5              (BTN     ): [J[91m♦[0m 9[91m♥[0m]  -> folded
+  Player6              (SB      ): [J[91m♥[0m 7[91m♥[0m]  -> Pair of Sevens, Six kicker  (WINNER: +1343)
+
+  Hand result: Player1 loses 1200 chips
+  Hand result: Player2 loses 10 chips
+  Hand result: Player3 loses 90 chips
+  Hand result: Player4 loses 43 chips
+  Hand result: Player5 breaks even
+  Hand result: Player6 wins 1343 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ A[91m♦[0m 3[30m♠[0m 6[91m♥[0m 8[30m♠[0m 6[30m♠[0m ]
+
+  Player1              (SB      ): [K[30m♣[0m 9[30m♠[0m]  -> folded
+  Player2              (BB      ): [4[91m♦[0m J[30m♣[0m]  -> Pair of Sixs, Jack kicker
+  Player3              (UTG     ): [9[91m♥[0m J[30m♠[0m]  -> folded
+  Player4              (MP      ): [5[30m♣[0m A[30m♠[0m]  -> folded
+  Player5              (CO      ): [9[30m♣[0m K[30m♠[0m]  -> Pair of Sixs, King kicker  (WINNER: +635)
+  Player6              (BTN     ): [8[30m♣[0m 7[91m♦[0m]  -> folded
+
+  Hand result: Player1 loses 15 chips
+  Hand result: Player2 loses 307 chips
+  Hand result: Player3 breaks even
+  Hand result: Player4 loses 10 chips
+  Hand result: Player5 wins 635 chips
+  Hand result: Player6 loses 303 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ K[91m♥[0m 4[30m♠[0m A[30m♣[0m 5[30m♣[0m Q[30m♠[0m ]
+
+  Player1              (BTN     ): [T[30m♣[0m K[91m♦[0m]  -> folded
+  Player2              (SB      ): [K[30m♣[0m 6[91m♥[0m]  -> Pair of Kings, Queen kicker  (WINNER: +2759)
+  Player3              (BB      ): [3[91m♦[0m 9[91m♥[0m]  -> folded
+  Player4              (UTG     ): [7[30m♣[0m 9[30m♠[0m]  -> folded
+  Player5              (MP      ): [8[30m♣[0m J[30m♠[0m]  -> folded
+  Player6              (CO      ): [6[91m♦[0m Q[91m♦[0m]  -> Pair of Queens, King kicker
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 wins 2759 chips
+  Hand result: Player3 loses 900 chips
+  Hand result: Player4 loses 478 chips
+  Hand result: Player5 loses 430 chips
+  Hand result: Player6 loses 951 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ J[91m♦[0m 7[30m♣[0m 4[91m♥[0m 5[30m♣[0m K[91m♦[0m ]
+
+  Player1              (CO      ): [2[91m♦[0m K[30m♠[0m]  -> folded
+  Player2              (BTN     ): [3[91m♦[0m Q[91m♦[0m]  -> folded
+  Player3              (SB      ): [4[30m♣[0m T[30m♠[0m]  -> Pair of Fours  (WINNER: +50)
+  Player4              (BB      ): [3[30m♣[0m K[30m♣[0m]  -> folded
+  Player5              (UTG     ): [5[30m♠[0m 7[91m♥[0m]  -> folded
+  Player6              (MP      ): [2[30m♣[0m 8[91m♦[0m]  -> High card, King, Jack, Eight  (WINNER: +2832)
+
+  Hand result: Player1 loses 952 chips
+  Hand result: Player2 loses 952 chips
+  Hand result: Player3 wins 50 chips
+  Hand result: Player4 loses 492 chips
+  Hand result: Player5 loses 486 chips
+  Hand result: Player6 wins 2832 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ T[30m♣[0m Q[91m♦[0m 9[30m♠[0m 5[30m♣[0m 5[91m♥[0m ]
+
+  Player1              (MP      ): [Q[91m♥[0m A[30m♣[0m]  -> folded
+  Player2              (CO      ): [8[91m♥[0m 9[91m♦[0m]  -> folded
+  Player3              (BTN     ): [8[30m♠[0m 7[91m♦[0m]  -> Pair of Fives
+  Player4              (SB      ): [K[30m♠[0m 6[91m♦[0m]  -> folded
+  Player5              (BB      ): [3[30m♠[0m 4[91m♥[0m]  -> Pair of Fives
+  Player6              (UTG     ): [Q[30m♠[0m J[91m♥[0m]  -> Two pair, Queens and Fives  (WINNER: +171)
+
+  Hand result: Player1 loses 20 chips
+  Hand result: Player2 loses 60 chips
+  Hand result: Player3 loses 60 chips
+  Hand result: Player4 loses 5 chips
+  Hand result: Player5 loses 26 chips
+  Hand result: Player6 wins 171 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 9[91m♥[0m 5[30m♠[0m 6[30m♣[0m ]
+
+  Player1              (UTG     ): [Q[91m♦[0m 8[91m♥[0m]  -> folded
+  Player2              (MP      ): [K[91m♦[0m 7[30m♠[0m]  -> folded
+  Player3              (CO      ): [8[30m♠[0m A[91m♦[0m]  -> folded
+  Player4              (BTN     ): [K[91m♥[0m 8[91m♦[0m]  -> folded
+  Player5              (SB      ): [2[91m♥[0m 3[91m♥[0m]  -> High card, Nine, Six, Five  (WINNER: +4450)
+  Player6              (BB      ): [6[91m♦[0m 6[91m♥[0m]  -> folded
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 breaks even
+  Hand result: Player3 loses 867 chips
+  Hand result: Player4 loses 10 chips
+  Hand result: Player5 wins 4450 chips
+  Hand result: Player6 loses 3573 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: (hand ended early - no board)
+
+  Player1              (BB      ): [A[91m♥[0m K[30m♠[0m]  -> folded
+  Player2              (UTG     ): [J[91m♦[0m T[30m♣[0m]  -> folded
+  Player3              (MP      ): [A[30m♠[0m 5[30m♣[0m]  -> folded
+  Player4              (CO      ): [K[91m♦[0m 2[30m♠[0m]  -> folded
+  Player5              (BTN     ): [Q[91m♦[0m 8[30m♣[0m]  -> folded
+  Player6              (SB      ): [3[30m♠[0m Q[30m♣[0m]  -> no showdown  (WINNER: +3684)
+
+  Hand result: Player1 loses 10 chips
+  Hand result: Player2 loses 1793 chips
+  Hand result: Player3 loses 88 chips
+  Hand result: Player4 breaks even
+  Hand result: Player5 loses 1793 chips
+  Hand result: Player6 wins 3684 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ A[91m♥[0m 5[91m♥[0m 8[91m♦[0m J[30m♣[0m 2[91m♥[0m ]
+
+  Player1              (SB      ): [3[30m♠[0m 9[91m♥[0m]  -> folded
+  Player2              (BB      ): [3[91m♥[0m 7[30m♣[0m]  -> High card, Ace, Jack, Eight, Jack kicker  (WINNER: +759)
+  Player3              (UTG     ): [5[30m♠[0m 4[30m♠[0m]  -> folded
+  Player4              (MP      ): [J[91m♥[0m 8[91m♥[0m]  -> folded
+  Player5              (CO      ): [Q[30m♠[0m 6[91m♦[0m]  -> High card, Ace, Queen, Jack, Queen kicker  (WINNER: +161)
+  Player6              (BTN     ): [8[30m♠[0m 2[30m♠[0m]  -> folded
+
+  Hand result: Player1 loses 5 chips
+  Hand result: Player2 wins 759 chips
+  Hand result: Player3 loses 10 chips
+  Hand result: Player4 breaks even
+  Hand result: Player5 wins 161 chips
+  Hand result: Player6 loses 4836 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 4[91m♥[0m 5[30m♣[0m J[91m♦[0m A[30m♣[0m 5[91m♥[0m ]
+
+  Player1              (BTN     ): [8[91m♥[0m 9[91m♦[0m]  -> Pair of Fives  (WINNER: +10)
+  Player2              (SB      ): [K[91m♦[0m 7[30m♠[0m]  -> folded
+  Player3              (BB      ): [7[91m♥[0m 9[91m♥[0m]  -> Pair of Fives  (WINNER: +10)
+  Player4              (UTG     ): [A[91m♥[0m 7[91m♦[0m]  -> Two pair, Aces and Fives  (WINNER: +20)
+  Player5              (MP      ): [Q[91m♦[0m 5[30m♠[0m]  -> folded
+  Player6              (CO      ): [A[30m♠[0m 9[30m♣[0m]  -> folded
+
+  Hand result: Player1 wins 10 chips
+  Hand result: Player2 loses 20 chips
+  Hand result: Player3 wins 10 chips
+  Hand result: Player4 wins 20 chips
+  Hand result: Player5 breaks even
+  Hand result: Player6 loses 20 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 7[91m♦[0m 2[30m♣[0m 5[30m♠[0m Q[91m♦[0m 3[91m♥[0m ]
+
+  Player1              (CO      ): [2[91m♦[0m T[91m♦[0m]  -> Pair of Twos, Ten kicker
+  Player2              (BTN     ): [K[91m♥[0m 9[91m♦[0m]  -> folded
+  Player3              (SB      ): [K[91m♦[0m 6[91m♦[0m]  -> High card, King, Queen, Seven
+  Player4              (BB      ): [J[30m♠[0m 4[30m♣[0m]  -> folded
+  Player5              (UTG     ): [3[91m♦[0m J[91m♥[0m]  -> folded
+  Player6              (MP      ): [5[91m♦[0m 9[91m♥[0m]  -> Pair of Fives, Nine kicker  (WINNER: +3001)
+
+  Hand result: Player1 loses 926 chips
+  Hand result: Player2 loses 1482 chips
+  Hand result: Player3 loses 45 chips
+  Hand result: Player4 loses 10 chips
+  Hand result: Player5 loses 1482 chips
+  Hand result: Player6 wins 3001 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 5[91m♥[0m 7[30m♠[0m A[91m♥[0m ]
+
+  Player1              (MP      ): [2[30m♣[0m 9[30m♠[0m]  -> folded
+  Player2              (CO      ): [6[91m♦[0m 6[30m♣[0m]  -> Pair of Sixs  (WINNER: +339)
+  Player3              (BTN     ): [5[91m♦[0m 6[30m♠[0m]  -> folded
+  Player4              (SB      ): [Q[30m♣[0m 9[91m♥[0m]  -> folded
+  Player5              (BB      ): [9[30m♣[0m 8[30m♣[0m]  -> folded
+  Player6              (UTG     ): [Q[91m♥[0m 3[91m♥[0m]  -> folded
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 wins 339 chips
+  Hand result: Player3 loses 108 chips
+  Hand result: Player4 loses 15 chips
+  Hand result: Player5 loses 108 chips
+  Hand result: Player6 loses 108 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ J[91m♦[0m 6[91m♥[0m 4[30m♠[0m T[91m♦[0m A[30m♠[0m ]
+
+  Player1              (UTG     ): [3[91m♦[0m 7[91m♦[0m]  -> folded
+  Player2              (MP      ): [2[30m♣[0m 9[91m♦[0m]  -> High card, Ace, Jack, Ten, Jack kicker
+  Player3              (CO      ): [K[91m♥[0m 8[91m♦[0m]  -> High card, Ace, King, Jack, King kicker  (WINNER: +1408)
+  Player4              (BTN     ): [Q[30m♣[0m 2[91m♦[0m]  -> High card, Ace, Queen, Jack, Queen kicker
+  Player5              (SB      ): [7[30m♣[0m Q[30m♠[0m]  -> folded
+  Player6              (BB      ): [9[30m♣[0m 7[30m♠[0m]  -> High card, Ace, Jack, Ten, Jack kicker
+
+  Hand result: Player1 breaks even
+  Hand result: Player2 loses 501 chips
+  Hand result: Player3 wins 1408 chips
+  Hand result: Player4 loses 892 chips
+  Hand result: Player5 loses 5 chips
+  Hand result: Player6 loses 10 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ T[91m♦[0m 4[91m♦[0m 7[91m♥[0m 2[30m♠[0m T[30m♠[0m ]
+
+  Player1              (BB      ): [A[30m♣[0m 2[30m♣[0m]  -> Two pair, Tens and Twos, Ace kicker
+  Player2              (UTG     ): [K[30m♣[0m A[30m♠[0m]  -> folded
+  Player3              (MP      ): [A[91m♥[0m 5[91m♥[0m]  -> Pair of Tens  (WINNER: +3532)
+  Player4              (CO      ): [7[30m♠[0m 9[30m♠[0m]  -> Two pair, Tens and Sevens, Nine kicker  (WINNER: +418)
+  Player5              (BTN     ): [K[30m♠[0m Q[30m♣[0m]  -> folded
+  Player6              (SB      ): [Q[91m♦[0m 5[30m♣[0m]  -> folded
+
+  Hand result: Player1 loses 84 chips
+  Hand result: Player2 loses 10 chips
+  Hand result: Player3 wins 3532 chips
+  Hand result: Player4 wins 418 chips
+  Hand result: Player5 loses 1928 chips
+  Hand result: Player6 loses 1928 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ 4[91m♦[0m Q[30m♠[0m 6[91m♥[0m T[91m♥[0m T[30m♠[0m ]
+
+  Player1              (SB      ): [T[91m♦[0m A[30m♠[0m]  -> folded
+  Player2              (BB      ): [3[91m♥[0m A[91m♥[0m]  -> folded
+  Player3              (UTG     ): [J[91m♦[0m Q[91m♥[0m]  -> Two pair, Queens and Tens, Jack kicker  (WINNER: +340)
+  Player4              (MP      ): [6[91m♦[0m 9[91m♦[0m]  -> folded
+  Player5              (CO      ): [8[30m♣[0m 6[30m♠[0m]  -> Two pair, Tens and Sixs, Queen kicker
+  Player6              (BTN     ): [2[91m♥[0m 9[30m♠[0m]  -> folded
+
+  Hand result: Player1 loses 15 chips
+  Hand result: Player2 loses 10 chips
+  Hand result: Player3 wins 340 chips
+  Hand result: Player4 loses 10 chips
+  Hand result: Player5 loses 295 chips
+  Hand result: Player6 loses 10 chips
+
+
+==================================================
+SHOWDOWN
+==================================================
+
+Board: [ T[91m♥[0m 4[91m♦[0m A[30m♠[0m K[91m♥[0m 6[91m♦[0m ]
+
+  Player1              (BTN     ): [2[30m♠[0m J[30m♠[0m]  -> High card, Ace, King, Jack
+  Player2              (SB      ): [J[91m♦[0m 7[30m♠[0m]  -> folded
+  Player3              (BB      ): [4[30m♣[0m 8[91m♥[0m]  -> folded
+  Player4              (UTG     ): [5[30m♣[0m K[30m♠[0m]  -> folded
+  Player5              (MP      ): [T[91m♦[0m 4[91m♥[0m]  -> folded
+  Player6              (CO      ): [K[91m♦[0m 3[30m♠[0m]  -> Pair of Kings  (WINNER: +2052)
+
+  Hand result: Player1 loses 985 chips
+  Hand result: Player2 loses 5 chips
+  Hand result: Player3 loses 985 chips
+  Hand result: Player4 loses 48 chips
+  Hand result: Player5 loses 29 chips
+  Hand result: Player6 wins 2052 chips
