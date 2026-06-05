@@ -151,17 +151,16 @@ poker/
 
 ```
 docs/
-├── planning/                 # Source-of-truth planning docs (read carefully)
-│   ├── PROJECT_PLAN.md       # Architecture, design principles, phase summary
-│   ├── TASKS.md              # Detailed task list with requirements per task
-│   ├── USER_NOTES.md         # User decisions and confirmed defaults
-│   └── PARALLEL_WORK.md      # How to split work across two workers
-└── tasks/                    # Per-task completion notes (one file per task as work happens)
-    └── README.md             # Convention for task notes
+├── README.md          # Index of all docs
+├── PROJECT_STATUS.md  # Current state, how to run, known issues
+├── ENGINE.md          # Architecture deep dive (data structures, betting, showdown)
+├── ML.md              # ML environment: PokerEnv, observations, models
+├── TRAINING.md        # Full training guide: NFSP, SD-CFR, parallel training
+├── BOTS.md            # Available bots, how to add one
+└── USER_NOTES.md      # Stable design decisions
 ```
 
 **Start here:**
-- [docs/planning/PROJECT_PLAN.md](docs/planning/PROJECT_PLAN.md) — overview, architecture, design principles
-- [docs/planning/TASKS.md](docs/planning/TASKS.md) — full task breakdown with acceptance criteria
-- [docs/planning/USER_NOTES.md](docs/planning/USER_NOTES.md) — confirmed decisions and assumptions
-- [docs/planning/PARALLEL_WORK.md](docs/planning/PARALLEL_WORK.md) — two-worker parallelization plan
+- [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) — what works, how to run it
+- [docs/TRAINING.md](docs/TRAINING.md) — ML training (NFSP/SD-CFR) guide
+- [docs/ENGINE.md](docs/ENGINE.md) — engine architecture and internals

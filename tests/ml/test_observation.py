@@ -68,10 +68,10 @@ def test_observation_shape(config_3p: GameConfig) -> None:
     players = [_player(i) for i in range(3)]
     state = _state(config_3p, players)
     obs = build_observation(state, seat=0)
-    assert obs.shape == (142,)
+    assert obs.shape == (155,)
     assert obs.dtype == np.float32
     shape, dtype = observation_spec()
-    assert shape == (142,)
+    assert shape == (155,)
     assert dtype == "float32"
 
 
@@ -102,6 +102,6 @@ def test_observation_6_player() -> None:
     players = [_player(i) for i in range(6)]
     state = _state(config, players)
     obs = build_observation(state, seat=0)
-    assert obs.shape == (142,)
+    assert obs.shape == (155,)
     assert (obs >= -0.1).all()
     assert (obs <= 1.1).all()

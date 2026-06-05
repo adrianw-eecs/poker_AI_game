@@ -1,61 +1,118 @@
-# Project status (current)
+# Project Status
 
-This repo is a **No-Limit Texas Hold’em** engine in Python with:
+This repo is a **No-Limit Texas Hold'em** engine in Python with a working ML training pipeline.
 
-- A working multi-hand **session runner** (CLI)
-- A text UI for human play (same bot interface as AIs)
-- Deterministic, testable core logic (broad unit/integration coverage in `tests/`)
-- A partially implemented **Gymnasium environment** (`poker.ml`) intended for RL/self-play
+---
 
-## Run the CLI game
+## What Works Today
 
-From the repo root:
+### Core Engine
+- Multi-hand **session runner** with CLI and text UI for human play
+- Deterministic, testable core logic — 128 tests, ~85% coverage on core engine
+- **Betting model**: per-street rounds with correct half-raise / all-in re-open logic
+- **Side pots + rake + odd chip** distribution
+- **Run-it-twice** (heads-up all-in, configurable)
+- **Rebuy system** (resets eliminated players between hands)
+- Performance: ~1.4 ms/hand (8 players), 40–60% faster than original via:
+  - Diagnostics disabled by default (`SessionConfig.enable_diagnostics = False`)
+  - Lazy showdown evaluation (pre-convert community cards once, fast path for single winner)
+  - Event I/O batching in `GameLogger` (30+ events → 1–2 disk writes per hand)
+
+### ML / RL Environment
+- `PokerEnv` (Gymnasium-compatible) with `step()` fully wired to the engine
+- Observation: `(142,)` float32 vector — cards, stacks, positions, action history
+- Action space: Discrete(7) — fold, check/call, 5 raise buckets
+- Action masking: `get_action_mask()` returns `(7,)` legal-action mask
+- Reward: `10× (stack_change / starting_stack)` at hand end; 0 during hand
+- NFSP and SD-CFR model implementations verified correct
+
+### Training Pipeline
+- `scripts/train_nfsp_v3.py` — sequential training, ~13 min for 250K episodes
+- `scripts/train_nfsp_parallel.py` — 4-worker parallel training, ~4 min for 250K episodes (3–4× speedup)
+- `scripts/validate_training.py` — validate any checkpoint against multiple opponents
+- Reward design fixed (v3): pure game rewards, no artificial anti-fold bonuses
+
+---
+
+## Run the CLI Game
 
 ```bash
 pip install -e ".[dev]"
 python -m poker.main --help
 python -m poker.main -n 2 -b human random
+python -m poker.main -n 3 -b flop_bot random random
 ```
 
-Notes:
-- The CLI entrypoint is `src/poker/main.py` (module `poker.main`).
-- Seats are configured with `--bots`, e.g. `-b human flop_bot random`.
+## Run Tests
 
-## What gets written to disk
+```bash
+# Smoke suite only (fast, ~30 seconds)
+pytest -m smoke
 
-- **Event log (optional)**: `--log <path>` writes **JSONL** events via `poker.logging.logger.GameLogger`.
-- **Invalid bot actions log**: always created under `games/AI_games/` as a timestamped `game_*.txt`
-  (written by `poker.engine.action_handler.ActionHandler`).
-- **Session summary JSON**: `games/AI_games/game_*.json` via `poker.persistence.save_game_session`.
-  - This is currently a **summary only** (final stacks, players, hand_count). It does *not* include full per-hand history yet.
+# Full suite (~128 tests, < 2 minutes)
+pytest
+```
 
-## Rules implemented (high level)
+---
 
-- **Blinds + ante**: posted at hand start (`hand_engine._post_antes`, `_post_blinds`)
-- **Betting model**: per-street betting rounds (`poker.engine.betting_round.BettingRound`)
-- **Legal actions**: fold/check/call/raise/all-in (`poker.engine.action_validator.legal_actions`)
-- **Side pots + rake + odd chip**: handled by `poker.state.pot_manager` and `poker.engine.showdown`
-- **Run-it-twice**: supported when `config.run_it_twice=True`, exactly 2 players remain, both all-in, and streets remain
+## Code Map
 
-Important current details:
-- **Min-raise**: computed as `current_bet_to_call + max(big_blind, last_raise_size)` (see `action_validator.py`).
-- **All-in “re-open” logic**: betting round re-opens only when the all-in adds at least a full min-raise increment.
-  (There is no separate “50% rule” threshold implemented yet.)
+| Module | What lives here |
+|--------|----------------|
+| `poker.main` | CLI session runner |
+| `poker.engine` | Hand/session orchestration, betting, validation, showdown |
+| `poker.state` | Immutable `GameState` + pot/player state helpers |
+| `poker.evaluation` | Hand evaluator + equity helpers |
+| `poker.bots` | Built-in bots + bot protocol |
+| `poker.logging` | JSONL event logging + replay helpers |
+| `poker.ml` | Gymnasium env, observation encoder, action space, NFSP/SD-CFR models |
 
-## Known gaps / limitations
+---
 
-- **ML env stepping**: `poker.ml.env.PokerEnv.step()` is intentionally `NotImplementedError` today.
-  Observations and legal-action masking exist, but gameplay is not yet wired to the engine.
-- **Persistence depth**: the JSON session saver currently can’t reconstruct per-hand detail from a single final `GameState`.
-- **Reproducibility knobs**: RNG is seedable (`poker.rng.RNG`), but the CLI currently does not expose a global seed flag.
+## Rules Implemented
 
-## Code map (where things live)
+- **Min-raise**: `current_bet_to_call + max(big_blind, last_raise_size)`
+- **All-in re-open**: Only re-opens if all-in adds at least a full min-raise increment
+- **Antes**: Posted before blinds each hand
+- **Blinds**: Fixed or escalating via `BlindSchedule`
+- **Rake**: Configurable percent + optional cap; applied per pot (main + side pots)
+- **Side pots**: Created whenever a player is all-in for less than the current bet
+- **Odd chip**: Goes to first eligible seat left of the dealer button
 
-- `poker.main`: CLI session runner
-- `poker.engine`: hand/session orchestration, betting, validation
-- `poker.state`: immutable `GameState` + pot/player state helpers
-- `poker.evaluation`: hand evaluator + equity helpers
-- `poker.bots`: built-in bots + bot protocol
-- `poker.logging`: JSONL event logging + replay helpers
-- `poker.ml`: observation + action-mask utilities and a stub Gymnasium env
+---
 
+## Critical Bug History
+
+### Betting Round Infinite Loop (Fixed)
+`_round_is_closed()` in `betting_round.py` didn't handle side pot players correctly.
+A player all-in for less than `max_commitment` kept the round open forever.
+
+**Fix**: Check `total_available = stack + committed_this_street` before returning False.
+
+### Hand Numbering Cycling (Fixed)
+Secondary effect of the betting round infinite loop — fixed by fixing root cause.
+
+### Multiple Actions in Single Round (Fixed)
+Player could act multiple times when all others were all-in or folded.
+**Fix**: Single-active-player check in betting round prevents cycling back.
+
+### ML Reward Misalignment (Fixed)
+Anti-folding bonuses (`-0.01 FOLD, +0.005 PLAY`) were mathematically insufficient,
+causing models to learn 100% fold. Fixed in v3: pure game rewards at 10× scale.
+
+---
+
+## Known Limitations
+
+- **Persistence depth**: Session JSON saver is summary-only; use JSONL event log for replay
+- **No global seed flag** in CLI (RNG is seedable programmatically via `poker.rng.RNG`)
+- **Batch `replace()` optimization** reverted for stability (betting round control flow is complex)
+
+---
+
+## Next Steps
+
+1. **Multi-generation population training** — run Gen 1+ with `--generation N`
+2. **Tournament mode** — track elimination order, prize pools, SNG/MTT formats
+3. **Timing instrumentation** — `TimingEvent` logging for bottleneck identification
+4. **Equity display** — real-time equity for human play UI

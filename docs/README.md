@@ -2,8 +2,11 @@
 
 Concise documentation for the current state of the project.
 
-- `PROJECT_STATUS.md`: what works today + how to run it
-- `BOTS.md`: available bots and how to add one
-- `ML.md`: current ML environment surface + what’s missing / next steps
-- `USER_NOTES.md`: stable decisions / assumptions (kept short)
-
+| File | Contents |
+|------|---------|
+| [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | What works today, how to run it, bug history, next steps |
+| [`ENGINE.md`](ENGINE.md) | Deep technical dive: data structures, betting logic, showdown, session management |
+| [`ML.md`](ML.md) | ML environment surface — PokerEnv, observation space, action space, models |
+| [`TRAINING.md`](TRAINING.md) | Full training guide: NFSP/SD-CFR commands, reward design, parallel training, troubleshooting |
+| [`BOTS.md`](BOTS.md) | Available bots and how to add a new one |
+| [`USER_NOTES.md`](USER_NOTES.md) | Stable decisions and assumptions (kept short) |
