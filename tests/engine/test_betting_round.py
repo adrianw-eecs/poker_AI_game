@@ -114,6 +114,19 @@ def test_no_cycling_back_to_same_player() -> None:
         "Should return None when only 1 player can act, not cycle to next"
 
 
+def test_raise_is_recorded_in_action_history() -> None:
+    """RAISE actions must appear in action_history_this_street (regression)."""
+    state = _state([_player(0, 1000), _player(1, 1000)], action_on=0, bet=0)
+    final = BettingRound(
+        state,
+        lambda seat, s: Action.raise_to(50) if seat == 0 else Action.call(50),
+        NullLogger(),
+    ).run()
+    action_types = [a.type.value for _, a in final.action_history_this_street]
+    assert "raise" in action_types
+    assert len(final.action_history_this_street) == 2
+
+
 def test_multiple_raises_without_double_actions() -> None:
     """Multiple raises should not cause the same player to act consecutively."""
     players = [

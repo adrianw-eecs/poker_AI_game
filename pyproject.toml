@@ -36,7 +36,7 @@ Repository = "https://github.com/your-org/poker"
 Documentation = "https://github.com/your-org/poker"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/poker"]
+packages = ["poker"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -45,7 +45,7 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 addopts = "--strict-markers --tb=short"
-pythonpath = ["src"]
+pythonpath = ["."]
 markers = [
     "smoke: fast integration tests (<30s) — run on code changes",
     "integration: full integration scenarios",
@@ -53,7 +53,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/poker"]
+source = ["poker"]
 branch = true
 
 [tool.coverage.report]

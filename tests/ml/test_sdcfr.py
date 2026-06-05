@@ -64,7 +64,7 @@ def test_regret_matching_sums_to_one() -> None:
 def test_sdcfr_model_get_strategy_shape() -> None:
     """get_strategy returns shape (7,), sums to 1, all non-negative."""
     model = SDCFRModel()
-    obs = np.random.rand(142).astype(np.float32)
+    obs = np.random.rand(155).astype(np.float32)
     legal_mask = np.ones(7, dtype=np.float32)
     strategy = model.get_strategy(obs, legal_mask)
     assert strategy.shape == (7,)
@@ -107,7 +107,7 @@ def test_sdcfr_bot_returns_legal_action() -> None:
 
 def test_weighted_reservoir_buffer() -> None:
     """Sampling from a populated buffer returns correct shapes."""
-    obs_dim = 149  # 142 obs + 7 advantages (as used by SDCFRModel)
+    obs_dim = 162  # 155 obs + 7 advantages (as used by SDCFRModel)
     buf = WeightedReservoirBuffer(capacity=2000, obs_dim=obs_dim)
 
     rng = np.random.default_rng(0)

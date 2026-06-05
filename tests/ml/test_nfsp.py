@@ -75,24 +75,24 @@ def _make_state() -> GameState:
 # ---------------------------------------------------------------------------
 
 def test_circular_buffer_add_sample() -> None:
-    buf = CircularBuffer(capacity=200, obs_dim=142)
-    obs = np.random.rand(142).astype(np.float32)
-    next_obs = np.random.rand(142).astype(np.float32)
+    buf = CircularBuffer(capacity=200, obs_dim=155)
+    obs = np.random.rand(155).astype(np.float32)
+    next_obs = np.random.rand(155).astype(np.float32)
     for i in range(100):
         buf.add(obs, action=i % 7, reward=float(i), next_obs=next_obs, done=False)
 
     assert len(buf) == 100
     batch = buf.sample(32)
-    assert batch["obs"].shape == (32, 142)
-    assert batch["next_obs"].shape == (32, 142)
+    assert batch["obs"].shape == (32, 155)
+    assert batch["next_obs"].shape == (32, 155)
     assert batch["actions"].shape == (32,)
     assert batch["rewards"].shape == (32,)
     assert batch["dones"].shape == (32,)
 
 
 def test_reservoir_buffer_uniform() -> None:
-    buf = ReservoirBuffer(capacity=5000, obs_dim=142)
-    obs = np.zeros(142, dtype=np.float32)
+    buf = ReservoirBuffer(capacity=5000, obs_dim=155)
+    obs = np.zeros(155, dtype=np.float32)
     for i in range(10_000):
         buf.add(obs, action=i % 7)
 
@@ -113,7 +113,7 @@ def test_reservoir_buffer_uniform() -> None:
 @pytest.mark.smoke
 def test_nfsp_model_select_action_shapes() -> None:
     model = NFSPModel()
-    obs = np.random.rand(142).astype(np.float32)
+    obs = np.random.rand(155).astype(np.float32)
     mask = np.ones(7, dtype=np.int32)
     action = model.select_action(obs, mask, training=False)
     assert isinstance(action, int)
@@ -123,8 +123,8 @@ def test_nfsp_model_select_action_shapes() -> None:
 @pytest.mark.smoke
 def test_nfsp_model_train_step_runs() -> None:
     model = NFSPModel(batch_size=64, train_every=1)
-    obs = np.random.rand(142).astype(np.float32)
-    next_obs = np.random.rand(142).astype(np.float32)
+    obs = np.random.rand(155).astype(np.float32)
+    next_obs = np.random.rand(155).astype(np.float32)
     mask = np.ones(7, dtype=np.int32)
 
     # Fill both buffers past the minimum threshold (512)
@@ -161,7 +161,7 @@ def test_nfsp_bot_act_returns_legal_action() -> None:
 
 def test_nfsp_model_save_load(tmp_path) -> None:
     model = NFSPModel()
-    obs = np.random.rand(142).astype(np.float32)
+    obs = np.random.rand(155).astype(np.float32)
     mask = np.ones(7, dtype=np.int32)
 
     save_file = str(tmp_path / "nfsp_test.pt")

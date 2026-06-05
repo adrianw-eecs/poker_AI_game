@@ -11,7 +11,7 @@ def test_env_reset_returns_obs() -> None:
     env = PokerEnv()
     obs, info = env.reset()
     assert isinstance(obs, np.ndarray)
-    assert obs.shape == (142,)
+    assert obs.shape == (155,)
     assert isinstance(info, dict)
 
 
@@ -24,7 +24,7 @@ def test_env_action_space_is_discrete() -> None:
 @pytest.mark.smoke
 def test_env_observation_space_shape() -> None:
     env = PokerEnv()
-    assert env.observation_space.shape == (142,)
+    assert env.observation_space.shape == (155,)
     assert env.observation_space.dtype == np.float32
 
 

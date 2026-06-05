@@ -1,46 +1,88 @@
-# ML / RL environment
+# ML / RL Environment
 
-The `poker.ml` package is the start of a **Gymnasium-compatible** RL interface.
+The `poker.ml` package provides a **Gymnasium-compatible** RL interface for training poker agents.
 
-## What exists today
+---
 
-- `poker.ml.env.PokerEnv`
-  - `reset()` returns an initial observation + info
-  - `get_action_mask()` returns a `(7,)` legal-action mask
-  - `step()` is currently **not implemented**
-- `poker.ml.observation.build_observation(state, seat) -> np.ndarray`
-  - Returns a fixed `(142,) float32` vector (card indices + normalized stacks/positions + basic street/action features).
-- `poker.ml.action_space`
-  - Discrete action space of size **7** with masking utilities and conversion helpers.
+## Current State
 
-### Discrete actions (current)
+### PokerEnv (`poker.ml.env.PokerEnv`)
+
+- `reset()` — returns initial observation + info dict
+- `step(action)` — fully wired to the engine; returns `(obs, reward, done, truncated, info)`
+- `get_action_mask()` — returns `(7,)` legal-action boolean mask
+- Reward: `10 × (stack_change / starting_stack)` at hand end, 0 during hand
+
+### Observation (`poker.ml.observation`)
+
+`build_observation(state, seat) → np.ndarray` returns a `(142,)` float32 vector:
+- Hole cards (one-hot encoded)
+- Community cards (one-hot, padded until revealed)
+- Current pot (normalized to starting stack)
+- Each player's stack (normalized)
+- Seat position relative to dealer
+- Amount to call (normalized)
+- Current street (0=pre-flop, 1=flop, 2=turn, 3=river)
+- Betting history for current street
+
+### Action Space
 
 `PokerEnv.action_space = Discrete(7)`:
 
-- `0`: fold
-- `1`: check/call (prefers call if legal)
-- `2..6`: raise buckets (quantized selection among currently legal raise-to amounts)
+| Index | Action |
+|-------|--------|
+| 0 | Fold |
+| 1 | Check/Call (prefers call if legal) |
+| 2–6 | Raise buckets (quantized raise-to amounts) |
 
-## What’s intentionally missing
+---
 
-`PokerEnv.step()` raises `NotImplementedError` because it isn’t yet wired to the engine/session loop.
-Until that happens, this repo supports:
+## Models
 
-- building observations from `GameState`
-- computing legal-action masks from `GameState`
-- running full games via the CLI/session engine (outside Gym stepping)
+### NFSP (`poker.ml.models.nfsp_model.NFSPModel`)
 
-## Roadmap (next concrete steps)
+Neural Fictitious Self-Play — two networks:
+- **Q-network** (DQN): learns best-response policy via TD learning
+- **Policy network**: behavioral cloning from best-response actions
 
-- **Wire `PokerEnv.step()` to the engine**
-  - Use `poker.engine.action_validator.legal_actions` + `poker.ml.action_space.action_index_to_action`
-  - Apply the action through the existing hand/session machinery (one action per env step)
-  - Return reward at hand end (stack delta), and keep intermediate reward at 0
-- **Episode definition**
-  - Decide: “one hand = episode” vs “tournament until 1 left = episode”
-  - Current `PokerEnv` docstring assumes “tournament until 1 left”
-- **Self-play hooks**
-  - Provide a training loop that uses `NullLogger` and swaps in learning bots that update in `observe_result()`
-- **Reproducibility**
-  - Add an explicit seed flow (env seed + bot seeds + deck RNG seed) so runs are repeatable end-to-end
+Mixing: 15% best-response, 85% average policy (`eta = 0.15`).
+Architecture: deep residual network, 4 blocks, ~350K parameters.
 
+### SD-CFR (`poker.ml.models.sdcfr_model.SDCFRModel`)
+
+Single Deep Counterfactual Regret Minimization:
+- **Advantage network** learns counterfactual regret values
+- Regret matching converges to approximate Nash equilibrium
+
+### Replay Buffers (`poker.ml.buffers`)
+
+All buffers are thread-safe (support parallel training):
+- `CircularBuffer` — Q-network transitions (FIFO, 1M capacity default)
+- `ReservoirBuffer` — Policy network samples (uniform, 5M capacity default)
+- `WeightedReservoirBuffer` — Reserved for future use
+
+---
+
+## Usage Example
+
+```python
+from poker.ml.env import PokerEnv
+from poker.config.game_config import GameConfig
+
+env = PokerEnv(config=GameConfig(num_players=2))
+obs, info = env.reset()
+mask = env.get_action_mask()   # (7,) boolean array
+
+action = 1  # check/call
+obs, reward, done, truncated, info = env.step(action)
+```
+
+---
+
+## Training
+
+See [`docs/TRAINING.md`](TRAINING.md) for the full training guide, including:
+- Sequential and parallel training scripts
+- Reward design rationale (why v3 uses pure game rewards)
+- Expected training curves and performance targets
+- Troubleshooting common failures (100% fold, high q_loss, etc.)
