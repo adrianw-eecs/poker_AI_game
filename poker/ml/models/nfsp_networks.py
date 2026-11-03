@@ -1,6 +1,7 @@
 """Shared network architectures for NFSP agents."""
 
 import copy
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -400,3 +401,128 @@ def build_policy_network_v2(**kwargs) -> PokerNetV2:
     """Policy network with a zero-initialized logit head."""
     kwargs.pop("arch", None)
     return PokerNetV2(head_type="policy", **kwargs)
+
+
+class HybridNetV2(nn.Module):
+    """Shared-trunk network with both a Q head and a policy head.
+
+    Motivation (see ``docs/HYBRID_PLAN.md``): NFSP trains two independent
+    networks, so the Q update and the policy update each pay a full
+    forward+backward through a separate representation. This class keeps the
+    exact ``PokerNetV2`` card/table embedding and residual trunk, then attaches
+    three heads:
+
+      * ``value_head`` / ``adv_head``  -> dueling Q values  (best response)
+      * ``policy_head``                -> action logits    (average policy)
+
+    ``forward`` returns ``(q_values, logits)`` so one pass serves both losses.
+    ``trunk_forward`` exposes the shared representation for callers that only
+    need one head.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__()
+        kwargs.pop("arch", None)
+        kwargs.pop("head_type", None)
+        base = PokerNetV2(head_type="value", **kwargs)
+        self.input_dim = base.input_dim
+        self.num_actions = base.num_actions
+        self.card_slots = base.card_slots
+        self.empty_card = base.empty_card
+        self.emb_dim = base.emb_dim
+        self.trunk_dim = int(base.merge.out_features)
+
+        # Shared representation (same modules as PokerNetV2).
+        self.rank_emb = base.rank_emb
+        self.suit_emb = base.suit_emb
+        self.card_emb = base.card_emb
+        self.card_mlp = base.card_mlp
+        self.table_mlp = base.table_mlp
+        self.merge_norm = base.merge_norm
+        self.merge = base.merge
+        self.dropout = base.dropout
+        self.trunk = base.trunk
+
+        # Dueling Q head (best response).
+        self.value_head = base.value_head
+        self.adv_head = base.adv_head
+        # Average-policy head, zero-initialised so it starts uniform.
+        self.policy_head = nn.Linear(self.trunk_dim, self.num_actions)
+        nn.init.zeros_(self.policy_head.weight)
+        nn.init.zeros_(self.policy_head.bias)
+
+    # -- shared trunk -------------------------------------------------
+    def _embed(self, ids: torch.Tensor) -> torch.Tensor:
+        empty = ids == self.empty_card
+        rank = torch.where(empty, torch.full_like(ids, 13), torch.remainder(ids, 13))
+        suit = torch.where(
+            empty,
+            torch.full_like(ids, 4),
+            torch.div(ids, 13, rounding_mode="floor"),
+        )
+        return torch.cat(
+            [self.rank_emb(rank), self.suit_emb(suit), self.card_emb(ids)], dim=-1
+        )
+
+    def trunk_forward(self, x: torch.Tensor) -> torch.Tensor:
+        ids = x[:, : self.card_slots].round().long().clamp(0, self.empty_card)
+        emb = self._embed(ids)
+        hole = torch.cat([emb[:, 0], emb[:, 1]], dim=-1)
+        board = emb[:, 2 : self.card_slots]
+        present = (ids[:, 2 : self.card_slots] != self.empty_card).unsqueeze(-1).to(
+            dtype=board.dtype
+        )
+        board_pool = (board * present).sum(dim=1)
+        card_h = self.card_mlp(torch.cat([hole, board_pool], dim=-1))
+        table_h = self.table_mlp(x[:, self.card_slots :])
+        hidden = self.dropout(
+            F.relu(self.merge(self.merge_norm(torch.cat([card_h, table_h], dim=-1))))
+        )
+        for block in self.trunk:
+            hidden = block(hidden)
+        return hidden
+
+    def heads(
+        self, hidden: torch.Tensor, legal_mask: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Q values (dueling, masked) and policy logits from a shared trunk."""
+        value = self.value_head(hidden)
+        advantages = self.adv_head(hidden)
+        if legal_mask is None:
+            mean_adv = advantages.mean(dim=-1, keepdim=True)
+        else:
+            mask = legal_mask.bool()
+            if mask.dim() == 1:
+                mask = mask.unsqueeze(0)
+            advantages = advantages.masked_fill(~mask, 0.0)
+            denom = mask.sum(dim=-1, keepdim=True).clamp(min=1).to(dtype=advantages.dtype)
+            mean_adv = advantages.sum(dim=-1, keepdim=True) / denom
+        return value + advantages - mean_adv, self.policy_head(hidden)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        legal_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Q values by default, so this drops into code written for PokerNetV2.
+
+        Call ``forward_both`` when the policy logits are needed from the same
+        pass; that is what the training step uses.
+        """
+        hidden = self.trunk_forward(x)
+        q_values, _logits = self.heads(hidden, legal_mask)
+        return q_values
+
+    def forward_both(
+        self,
+        x: torch.Tensor,
+        legal_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One trunk pass returning ``(q_values, policy_logits)``."""
+        hidden = self.trunk_forward(x)
+        return self.heads(hidden, legal_mask)
+
+
+def build_hybrid_network_v2(**kwargs: Any) -> HybridNetV2:
+    """Shared-trunk Q + policy network."""
+    return HybridNetV2(**kwargs)

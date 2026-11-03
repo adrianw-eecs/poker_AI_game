@@ -7,6 +7,28 @@ regret estimates become a supervised target for NFSP's average-strategy head.
 Gating (SD-CFR proposes, NFSP decides whether to obey) is documented as a later
 phase in §7, not the starting point.
 
+> **Implementation status (2026-11-03).** Phases A–C are implemented and tested;
+> Phase D has a working driver but the long training run has not been done.
+>
+> | Component | State |
+> |---|---|
+> | `SDCFRModel(obs_version=2)` | Done, v1 checkpoints still load |
+> | `ExternalSamplingTraverser(obs_version=, bet_scheme=)` | Done |
+> | `SDCFRBot` follows the model's encoder | Done |
+> | `HybridNetV2` shared trunk + Q/policy heads | Done |
+> | `NFSPModel(shared_trunk=, distill_kappa=)` | Done |
+> | `scripts/train_sdcfr_v2.py` (v2 teacher) | Done, trains |
+> | `scripts/train_hybrid.py` (distillation driver) | Done, runs |
+> | `tests/ml/test_hybrid.py` | 16 tests passing |
+> | κ=0 reproduces plain NFSP exactly | Verified to 1e-9 with dropout held fixed |
+> | Distillation moves policy to CFR target | Verified: 0.0003 → 0.9999 |
+> | Long hybrid run vs both parents | **Not done — Phase D remaining** |
+>
+> A 600-episode smoke comparison gave +443 BB/100 (κ=0.25) vs +259 (κ=0), but the
+> 95% intervals overlap almost entirely at n=40, so that is not evidence of a win.
+> Phase D needs a long run and the paired evaluation in §5.
+
+
 ---
 
 ## 1. Why the two models are complementary
@@ -180,13 +202,21 @@ has `obs_dim=105` packing for SD-CFR (`98 + 7`); widen to `OBS_V2_DIM + 7`.
 ### Phase D — evaluation
 Use the existing harness; do not invent new metrics.
 
+There is currently no ``hybrid:`` bot token in ``validate_training.py`` /
+``poker.main``. Until one is added, a hybrid checkpoint loads under the existing
+``nfsp:`` token, because the hybrid **is** an ``NFSPModel`` — its policy head is
+what answers ``select_action``:
+
 ```bash
 python scripts/validate_training.py --hands 400 --seed 1 \
-  --bots hybrid:models/hybrid/hybrid.pt \
+  --bots nfsp:models/hybrid/hybrid.pt \
          nfsp:models/nfsp_v2/nfsp_v2.pt \
          sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt \
          random flop
 ```
+
+Adding a distinct ``hybrid:`` token is a small follow-up if you want the two
+labelled separately in one table.
 
 Success criterion, stated before running: hybrid must beat **the better of the two
 parents** on BB/100 with a non-overlapping 95% interval, and must not collapse
@@ -196,6 +226,20 @@ Also keep the BR-proxy check from `train_nfsp_v2.py::exploitability_proxy`. The
 hybrid should show a *stable* proxy across evaluations; the oscillation in §1 is
 the symptom it is meant to cure, so a hybrid that still swings ±400 BB/100 has not
 achieved the goal even if its mean is higher.
+
+**Running it (implemented):**
+
+```bash
+# 1. v2 teacher (the shipped sdcfr_prod checkpoint is obs v1 and cannot be used)
+python scripts/train_sdcfr_v2.py --iterations 400 --traversals 200
+
+# 2. hybrid learner
+python scripts/train_hybrid.py \
+  --teacher models/sdcfr_v2/sdcfr_v2.pt \
+  --kappa 0.25 --shared-trunk \
+  --episodes 60000 --eval-every 5000 --checkpoint-every 5000
+```
+
 
 ---
 

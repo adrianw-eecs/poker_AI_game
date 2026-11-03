@@ -11,7 +11,7 @@ Concise documentation for the current state of the project.
 | [`ML.md`](ML.md) | Environment, observation encoders, action space, models |
 | [`NFSP_IMPROVEMENTS.md`](NFSP_IMPROVEMENTS.md) | Observation gaps and training improvements for NFSP |
 | [`TRAINING.md`](TRAINING.md) | Training commands including long-form runs, reward design, troubleshooting |
-| [`HYBRID_PLAN.md`](HYBRID_PLAN.md) | Design plan for combining NFSP + SD-CFR into one model |
+| [`HYBRID_PLAN.md`](HYBRID_PLAN.md) | Combined NFSP + SD-CFR design and implementation status |
 | [`NFSP_Notes.md`](NFSP_Notes.md) | NFSP paper and reference-implementation notes |
 | [`SD-CFR_Notes.md`](SD-CFR_Notes.md) | SD-CFR notes |
 | [`BOTS.md`](BOTS.md) | Available bots and how to add a new one |

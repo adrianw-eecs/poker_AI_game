@@ -95,7 +95,9 @@ pytest            # full suite, 235 tests, ~10 s
 |---|---|
 | `train_nfsp_selfplay.py` | NFSP v1 training (98-wide, one learning seat) |
 | `train_nfsp_v2.py` | NFSP v2 training (318-wide, pot-fraction, multi-seat) |
-| `train_sdcfr_selfplay.py` | Current SD-CFR training |
+| `train_sdcfr_v2.py` | SD-CFR training on obs v2 (produces the hybrid teacher) |
+| `train_hybrid.py` | NFSP + SD-CFR hybrid: distillation driver |
+| `train_sdcfr_selfplay.py` | SD-CFR training on the legacy encoder |
 | `train_sdcfr.py`, `train_sdcfr_extended.py` | Earlier SD-CFR runs |
 | `validate_training.py` | Single-model sweep, or `--bots` for a full scored table |
 | `profile_training.py` | Timing profiler for the training loop |

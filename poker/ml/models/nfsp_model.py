@@ -9,10 +9,12 @@ import torch.nn as nn
 import torch.optim as optim
 
 from poker.ml.action_space import BetScheme
-from poker.ml.buffers import CircularBuffer, ReservoirBuffer
+from poker.ml.buffers import CircularBuffer, ReservoirBuffer, WeightedCircularBuffer
+from poker.ml.cfr.regret_matching import regret_matching
 from poker.ml.observation import adapt_observation
 from poker.ml.observation_v2 import OBS_V2_DIM
 from poker.ml.models.nfsp_networks import (
+    build_hybrid_network_v2,
     build_policy_network,
     build_policy_network_v2,
     build_q_network,
@@ -123,9 +125,16 @@ class NFSPModel:
         bet_scheme: BetScheme | None = None,
         epsilon_schedule: str = "linear",
         q_loss: str = "auto",
+        shared_trunk: bool = False,
+        distill_kappa: float = 0.0,
+        distill_capacity: int = 200_000,
     ) -> None:
         if obs_version not in (1, 2):
             raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
+        if shared_trunk and obs_version != 2:
+            raise ValueError("shared_trunk requires obs_version=2")
+        if not 0.0 <= distill_kappa <= 1.0:
+            raise ValueError(f"distill_kappa must be in [0, 1], got {distill_kappa}")
         if epsilon_schedule not in ("linear", "inv_sqrt"):
             raise ValueError(f"epsilon_schedule must be linear or inv_sqrt, got {epsilon_schedule}")
         if updates_per_train < 1:
@@ -162,6 +171,11 @@ class NFSPModel:
         self.q_lr = q_lr
         self.policy_lr = policy_lr
         self.force_best_response = False
+        # Hybrid (SD-CFR-as-teacher) settings. kappa weighs the regret-matching
+        # distillation term against the NFSP reservoir term in the policy loss;
+        # kappa=0 reproduces plain NFSP exactly.
+        self.distill_kappa = float(distill_kappa)
+        self._distill_buffer: WeightedCircularBuffer | None = None
 
         self.device = torch.device(
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -172,9 +186,18 @@ class NFSPModel:
         if obs_version == 1:
             self.q_network = build_q_network().to(self.device)
             self.policy_network = build_policy_network().to(self.device)
+        elif shared_trunk:
+            # One network, two heads: the policy head and the dueling Q head
+            # share card embeddings and the residual trunk.
+            hybrid = build_hybrid_network_v2().to(self.device)
+            self.q_network = hybrid
+            self.policy_network = hybrid
         else:
             self.q_network = build_q_network_v2().to(self.device)
             self.policy_network = build_policy_network_v2().to(self.device)
+        self.shared_trunk = bool(shared_trunk and obs_version == 2)
+        # A shared module cannot be deep-copied independently of its optimizer
+        # wiring, but a frozen copy is exactly what the target net needs.
         self.target_network = make_target_network(self.q_network).to(self.device)
 
         self.q_buffer = CircularBuffer(capacity=q_capacity, obs_dim=obs_dim, dtype=self._obs_dtype)
@@ -184,6 +207,12 @@ class NFSPModel:
 
         self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
         self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=policy_lr)
+
+        # Distillation memory: one row per (obs, 7 advantages, 7 mask) from an
+        # SD-CFR traversal, packed as [obs | advantages | mask] so a single
+        # WeightedCircularBuffer carries it.
+        if self.distill_kappa > 0.0 or self.shared_trunk:
+            self._ensure_distill_buffer(distill_capacity)
 
         self._step = 0
         self._q_updates = 0
@@ -378,6 +407,11 @@ class NFSPModel:
                 q_loss = self._update_q()
             if len(self.policy_buffer) >= self.batch_size:
                 policy_loss = self._update_policy()
+                # SD-CFR-as-teacher: an additional cross-entropy step toward
+                # regret-matching targets, weighted by kappa. Kept as a separate
+                # optimiser step so the reservoir loss is never diluted.
+                if self.distill_kappa > 0.0:
+                    self._distillation_step()
         return {"q_loss": q_loss, "policy_loss": policy_loss}
 
     def _update_q(self) -> float:
@@ -446,6 +480,79 @@ class NFSPModel:
             sync_target_network(self.q_network, self.target_network)
         return float(total_loss.item())
 
+    def _ensure_distill_buffer(self, capacity: int) -> None:
+        """(Re)create the distillation memory at the current obs width."""
+        want = int(self.q_network.input_dim) + 2 * self.num_actions
+        if self._distill_buffer is not None and self._distill_buffer.obs_dim == want:
+            return
+        self._distill_buffer = WeightedCircularBuffer(capacity=capacity, obs_dim=want)
+
+    def add_regret_sample(
+        self,
+        obs: npt.NDArray[np.float32],
+        advantages: npt.NDArray[np.float32],
+        legal_mask: npt.NDArray[np.float32],
+        weight: float = 1.0,
+    ) -> None:
+        """Store one SD-CFR traversal target for policy distillation.
+
+        ``advantages`` are the counterfactual advantages for the 7 actions and
+        ``legal_mask`` marks which were legal. Regret matching is applied at
+        sample time, so the stored row stays interpretable.
+        """
+        if self._distill_buffer is None:
+            self._ensure_distill_buffer(200_000)
+        row = np.concatenate(
+            [
+                np.asarray(obs, dtype=np.float32),
+                np.asarray(advantages, dtype=np.float32),
+                np.asarray(legal_mask, dtype=np.float32),
+            ]
+        )
+        assert self._distill_buffer is not None
+        if row.shape[0] != self._distill_buffer.obs_dim:
+            raise ValueError(
+                f"regret row is {row.shape[0]} wide, buffer expects "
+                f"{self._distill_buffer.obs_dim}"
+            )
+        self._distill_buffer.add(row, 0, float(weight))
+
+    def _distillation_step(self) -> float | None:
+        """Cross-entropy from the policy head to regret-matching targets."""
+        buf = self._distill_buffer
+        if buf is None or len(buf) < min(self.batch_size, 64):
+            return None
+        obs_dim = int(self.q_network.input_dim)
+        batch = buf.sample(self.batch_size)
+        packed = batch["obs"]
+        obs_batch = packed[:, :obs_dim]
+        adv_batch = packed[:, obs_dim : obs_dim + self.num_actions]
+        mask_batch = packed[:, obs_dim + self.num_actions :]
+
+        obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
+        mask_t = torch.as_tensor(mask_batch, dtype=torch.bool, device=self.device)
+        # Regret matching must run on CPU: it is a small normalisation and the
+        # target is not differentiable.
+        targets = np.stack(
+            [
+                regret_matching(adv_batch[i], mask_batch[i])
+                for i in range(adv_batch.shape[0])
+            ]
+        ).astype(np.float32)
+        target_t = torch.as_tensor(targets, dtype=torch.float32, device=self.device)
+
+        self.policy_network.train()
+        logits = self.policy_network(obs_t)
+        logits = logits.masked_fill(~mask_t, _ILLEGAL_LOGIT)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        loss = -(target_t * log_probs).sum(dim=-1).mean()
+        self.policy_optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=_GRAD_CLIP)
+        self.policy_optimizer.step()
+        self._p_updates += 1
+        return float(loss.item())
+
     def _update_policy(self) -> float:
         """Cross-entropy on reservoir best-response actions, masked to legal actions."""
         self.policy_network.train()
@@ -505,6 +612,8 @@ class NFSPModel:
                     "bet_scheme": self.bet_scheme.value,
                     "num_actions": self.num_actions,
                     "arch": "pokernet_v2" if self.obs_version == 2 else "pokernet_v1",
+                    "shared_trunk": self.shared_trunk,
+                    "distill_kappa": self.distill_kappa,
                 },
                 "q_buffer": q_state,
                 "policy_buffer": p_state,
@@ -521,15 +630,30 @@ class NFSPModel:
         policy_kwargs.pop("arch", None)
         q_lr = float(self._config.get("q_lr", self._config.get("lr", self.q_lr)))
         policy_lr = float(self._config.get("policy_lr", self._config.get("lr", self.policy_lr)))
-        if q_arch == "v2":
+
+        # A shared-trunk checkpoint stores ONE module's state under both keys and
+        # carries a policy_head, which a plain PokerNetV2 would reject.
+        hybrid_state = "policy_head.weight" in q_state
+        if hybrid_state:
+            self.shared_trunk = True
+            hybrid = build_hybrid_network_v2(**q_kwargs).to(self.device)
+            self.q_network = hybrid
+            self.policy_network = hybrid
+            self.target_network = make_target_network(hybrid).to(self.device)
+            self.q_optimizer = optim.Adam(hybrid.parameters(), lr=q_lr)
+            self.policy_optimizer = optim.Adam(hybrid.parameters(), lr=policy_lr)
+        elif q_arch == "v2":
             self.q_network = build_q_network_v2(**q_kwargs).to(self.device)
             self.policy_network = build_policy_network_v2(**policy_kwargs).to(self.device)
+            self.target_network = make_target_network(self.q_network).to(self.device)
+            self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
+            self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=policy_lr)
         else:
             self.q_network = build_q_network(**q_kwargs).to(self.device)
             self.policy_network = build_policy_network(**policy_kwargs).to(self.device)
-        self.target_network = make_target_network(self.q_network).to(self.device)
-        self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
-        self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=policy_lr)
+            self.target_network = make_target_network(self.q_network).to(self.device)
+            self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
+            self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=policy_lr)
         self.num_actions = int(q_kwargs["num_actions"])
         self.q_lr = q_lr
         self.policy_lr = policy_lr
@@ -584,10 +708,21 @@ class NFSPModel:
         self._config["obs_version"] = self.obs_version
         self._config["bet_scheme"] = self.bet_scheme.value
         self._obs_dtype = np.dtype(np.float16 if self.obs_version == 2 else np.float32)
+        # Restore hybrid settings from metadata. shared_trunk decides whether one
+        # module backs both heads; kappa is a training-time weight only.
+        self.distill_kappa = float(meta.get("distill_kappa", self.distill_kappa))
+        if meta.get("shared_trunk"):
+            self.shared_trunk = True
         self._rebuild_networks(q_state, policy_state)
-        self.q_network.load_state_dict(q_state)
-        self.policy_network.load_state_dict(policy_state)
-        self.target_network.load_state_dict(checkpoint["target_network"])
+        if self.shared_trunk:
+            # One module, one state dict: loading it twice would be redundant
+            # and the two saved copies are identical.
+            self.q_network.load_state_dict(q_state)
+            self.target_network.load_state_dict(checkpoint["target_network"])
+        else:
+            self.q_network.load_state_dict(q_state)
+            self.policy_network.load_state_dict(policy_state)
+            self.target_network.load_state_dict(checkpoint["target_network"])
         if "q_optimizer" in checkpoint:
             self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
         if "policy_optimizer" in checkpoint:

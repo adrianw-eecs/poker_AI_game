@@ -6,7 +6,7 @@ import torch
 
 from poker.bots.random_bot import RandomBot
 from poker.config.game_config import GameConfig
-from poker.ml.action_space import build_action_mask
+from poker.ml.action_space import BetScheme, build_action_mask
 from poker.ml.buffers import WeightedCircularBuffer
 from poker.ml.cfr.regret_matching import compute_strategy_from_network
 from poker.ml.env import PokerEnv
@@ -45,11 +45,38 @@ class ExternalSamplingTraverser:
         advantage_network: PokerNetwork,
         device: torch.device,
         regret_buffer: WeightedCircularBuffer,
+        obs_version: int = 1,
+        bet_scheme: BetScheme = BetScheme.LEGACY,
     ) -> None:
+        if obs_version not in (1, 2):
+            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
         self.config = config
         self.advantage_network = advantage_network
         self.device = device
         self.regret_buffer = regret_buffer
+        self.obs_version = obs_version
+        self.bet_scheme = bet_scheme
+
+    def pack(
+        self,
+        obs: npt.NDArray[np.float32],
+        advantages: npt.NDArray[np.float32],
+    ) -> npt.NDArray[np.float32]:
+        """Pack ``[obs | advantages]`` into one buffer row.
+
+        The obs width depends on the encoder (98 for v1, 318 for v2), so this
+        cannot be a module-level constant. A mismatched width here is what the
+        regret buffer would otherwise reject at sample time.
+        """
+        row = np.concatenate([obs, advantages]).astype(np.float32)
+        expected = self.regret_buffer.obs_dim
+        if row.shape[0] != expected:
+            raise ValueError(
+                f"packed row is {row.shape[0]} wide but the regret buffer expects "
+                f"{expected}. Traverser obs_version={self.obs_version} "
+                f"(obs {obs.shape[0]} + 7 actions)."
+            )
+        return row
 
     def traverse(
         self,
@@ -87,6 +114,8 @@ class ExternalSamplingTraverser:
             ante=self.config.ante,
             learning_seat=traverser_seat,
             opponent_bots=opponent_bots,
+            obs_version=self.obs_version,
+            bet_scheme=self.bet_scheme,
         )
 
         obs, _ = env.reset()
@@ -96,8 +125,8 @@ class ExternalSamplingTraverser:
         if env.state is None or env.state.action_on_seat != traverser_seat:
             return 0.0
 
-        # (obs, sampled_action, strategy_prob_for_that_action)
-        decisions: list[tuple[npt.NDArray[np.float32], int, float]] = []
+        # (obs, sampled_action, strategy_prob_for_that_action, legal_mask)
+        decisions: list[tuple[npt.NDArray[np.float32], int, float, npt.NDArray[np.float32]]] = []
         terminated = False
         terminal_reward = 0.0
 
@@ -105,14 +134,16 @@ class ExternalSamplingTraverser:
             if env.state is None or env.state.action_on_seat != traverser_seat:
                 break
 
-            legal_mask = build_action_mask(env.state, traverser_seat).astype(np.float32)
+            legal_mask = build_action_mask(
+                env.state, traverser_seat, scheme=self.bet_scheme
+            ).astype(np.float32)
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
             strategy = compute_strategy_from_network(
                 self.advantage_network, obs_tensor, legal_mask, self.device
             )
 
             action = int(np.random.choice(7, p=strategy))
-            decisions.append((obs.copy(), action, float(strategy[action])))
+            decisions.append((obs.copy(), action, float(strategy[action]), legal_mask))
 
             obs, reward, terminated, _, _ = env.step(action)
             if terminated:
@@ -128,11 +159,11 @@ class ExternalSamplingTraverser:
         # sqrt weighting slows unbounded growth: linear weights reach 5000x by
         # iteration 5000; sqrt stays below 71x, keeping early data in budget (Fix #11).
         weight = float(np.sqrt(max(1, cfr_iteration)))
-        for obs_i, action_i, prob_i in decisions:
+        for obs_i, action_i, prob_i, mask_i in decisions:
             advantages = np.zeros(7, dtype=np.float32)
             is_weight = min(1.0 / max(prob_i, _MIN_PROB), _MAX_IS_WEIGHT)
             advantages[action_i] = terminal_reward * is_weight
-            packed = np.concatenate([obs_i, advantages]).astype(np.float32)
+            packed = self.pack(obs_i, advantages)
             self.regret_buffer.add(packed, 0, weight)
 
         return terminal_reward

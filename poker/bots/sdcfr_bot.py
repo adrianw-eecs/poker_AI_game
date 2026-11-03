@@ -10,9 +10,11 @@ from poker.ml.action_space import (
     BetScheme,
     action_index_to_action,
     action_to_action_index,
+    build_action_mask,
 )
 from poker.ml.models.sdcfr_model import SDCFRModel
 from poker.ml.observation import build_observation
+from poker.ml.observation_v2 import build_observation_v2
 from poker.state.game_state import GameState
 
 
@@ -31,8 +33,11 @@ class SDCFRBot:
     ) -> None:
         self._name = name
         self.model = model if model is not None else SDCFRModel(**model_kwargs)
-        # Frozen SD-CFR checkpoints were trained on the legacy bet buckets.
-        self.bet_scheme = BetScheme.LEGACY
+        # Follow the model: legacy checkpoints are obs v1 / LEGACY buckets, while
+        # a v2 SD-CFR uses the hero-relative encoder and pot-fraction sizing.
+        self.obs_version = int(getattr(self.model, "obs_version", 1))
+        scheme = getattr(self.model, "bet_scheme", BetScheme.LEGACY)
+        self.bet_scheme = scheme if isinstance(scheme, BetScheme) else BetScheme.LEGACY
         self._seat_cache: int | None = None
         self._last_state_id: int | None = None
 
@@ -52,8 +57,13 @@ class SDCFRBot:
             Sampled action from the mixed Nash strategy.
         """
         seat = self._find_seat(state)
-        obs = build_observation(state, seat)
-        legal_mask = self._build_action_mask(state, legal, seat).astype(np.float32)
+        if self.obs_version == 2:
+            obs = build_observation_v2(state, seat)
+        else:
+            obs = build_observation(state, seat)
+        legal_mask = build_action_mask(
+            state, seat, scheme=self.bet_scheme, dedup=True
+        ).astype(np.float32)
         strategy = self.model.get_strategy(obs, legal_mask)
 
         # Stochastic sampling — Nash strategies are mixed; never use argmax.
@@ -65,7 +75,7 @@ class SDCFRBot:
             action_idx = int(np.random.choice(legal_indices))
 
         chosen = action_index_to_action(
-            action_idx, state, seat, scheme=BetScheme.LEGACY
+            action_idx, state, seat, scheme=self.bet_scheme
         )
         return ensure_progressing_action(state, chosen, legal)
 
