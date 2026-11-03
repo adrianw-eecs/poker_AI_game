@@ -28,6 +28,51 @@ Build a **No-Limit Texas Hold'em** engine in Python that can be used for:
 Known deviation: a player facing a short all-in is still offered a raise.
 `reopens_betting()` is correct but `legal_actions()` does not consult it.
 
+## Configuration
+
+`GameConfig` (`poker/config/game_config.py`) has exactly these fields:
+
+| Field | Meaning |
+|---|---|
+| `num_players` | 2–10 |
+| `starting_stack` | Chips per player at hand start |
+| `small_blind`, `big_blind` | Blinds |
+| `ante` | Flat per-player ante, posted before blinds |
+| `rake_percent`, `rake_cap` | Rake percent and optional per-hand cap |
+| `blind_schedule` | A `BlindSchedule` instance |
+| `run_it_twice` | Heads-up all-in only |
+| `tournament_mode` | `TournamentMode.SNG` / `MTT` / `None` for cash |
+| `final_table_size` | MTT final-table notification size |
+
+`BlindSchedule` (`poker/config/blind_schedule.py`) has:
+
+| Field | Meaning |
+|---|---|
+| `levels` | Sequence of `BlindLevel(small_blind, big_blind, ante)` |
+| `hands_per_level` | Hands before escalation |
+| `fixed` | `True` = cash-game mode, ignore escalation |
+
+```python
+from poker.config.blind_schedule import BlindLevel, BlindSchedule
+from poker.config.game_config import GameConfig
+
+config = GameConfig(
+    num_players=6,
+    starting_stack=1000,
+    small_blind=25,
+    big_blind=50,
+    ante=0,
+    rake_percent=0.0,
+    rake_cap=None,
+    blind_schedule=BlindSchedule(
+        levels=[BlindLevel(25, 50, 0)],
+        hands_per_level=10**9,
+        fixed=True,
+    ),
+    run_it_twice=False,
+)
+```
+
 ## Bots + learning surface
 
 - Humans and bots share the same `Bot` protocol (`act()` + `observe_result()`).

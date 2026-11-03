@@ -43,6 +43,109 @@ python scripts/profile_training.py --v2 --episodes 100
 
 ---
 
+## Long-Form NFSP Training
+
+`train_nfsp_v2.py` is the current trainer. Defaults are already tuned for a long
+run, so the minimal long-form invocation is small.
+
+### Resume a long run (recommended)
+
+Resuming from the current checkpoint preserves buffers, optimizer state, epsilon
+position, and self-play schedule:
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --checkpoint models/nfsp_v2/nfsp_v2.pt \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 200000 \
+  --eval-every 5000 \
+  --checkpoint-every 10000 \
+  --model-name nfsp_v2
+```
+
+### Fresh long run into a new folder
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 500000 \
+  --eval-every 10000 \
+  --checkpoint-every 25000 \
+  --min-players 2 --max-players 9 \
+  --batch-size 2048 \
+  --train-every 64 \
+  --updates-per-train 2 \
+  --eta 0.1 \
+  --random-eval-hands 100 \
+  --stop-min-episode 50000 \
+  --stop-patience 15 \
+  --model-name nfsp_long
+```
+
+### Unattended overnight run
+
+Higher patience, fewer evaluations, and no early stop surprise. Validation is the
+slowest part of the loop, so evaluating less often is what buys wall-clock time:
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --checkpoint models/nfsp_v2/nfsp_v2.pt \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 1000000 \
+  --eval-every 25000 \
+  --checkpoint-every 50000 \
+  --stop-patience 40 \
+  --stop-min-episode 100000 \
+  --random-eval-hands 50 \
+  --sdcfr-eval-only \
+  --model-name nfsp_overnight
+```
+
+### Parameter reference
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--episodes` | 100000 | Episodes, not hands. ~10 hands/episode |
+| `--eval-every` | 5000 | Validation is the main non-training cost; raise it for long runs |
+| `--checkpoint-every` | 10000 | Writes `nfsp_gen_N.pt`; these are ~150 MB each |
+| `--batch-size` | 2048 | Gradient batch |
+| `--train-every` | 64 | Decisions between training steps |
+| `--updates-per-train` | 1 | Raise to 2–4 to increase replay ratio |
+| `--eta` | 0.1 | Best-response mix; 0.1 is the paper-faithful value |
+| `--min-players` / `--max-players` | 2 / 9 | 6-player is weighted 2× |
+| `--stop-min-episode` | 20000 | Earliest stall stop |
+| `--stop-patience` | 10 | Evals without improvement before stopping |
+| `--random-eval-hands` | 100 | Hands per player count for Random+Flop eval |
+| `--sdcfr-eval-only` | off | Skips Random+Flop eval, roughly halves eval time |
+| `--model-name` | `nfsp_v2` | Output folder `models/<name>/` |
+| `--no-validation` | off | Disables evaluation entirely (throughput testing only) |
+
+### Outputs
+
+For `--model-name nfsp_v2`:
+
+- `models/nfsp_v2/nfsp_v2.pt` — final / best checkpoint
+- `models/nfsp_v2/nfsp_best.pt` — best SD-CFR lower bound so far
+- `models/nfsp_v2/nfsp_gen_N.pt` — periodic generations
+- `models/nfsp_v2/eval_history.csv` — per-eval metrics
+
+### Monitoring
+
+```bash
+# Live loss / eval lines
+Get-Content models/nfsp_v2/training_v2.txt -Wait -Tail 20
+
+# Best BB/100 trend
+Get-Content models/nfsp_v2/eval_history.csv | Select-Object -First 1
+Get-Content models/nfsp_v2/eval_history.csv | Select-Object -Last 10
+```
+
+The honest health check is `br_proxy_bb100` in `eval_history.csv`. A rising mean
+with a wildly oscillating proxy means the best response is not converging, even if
+the average policy is improving.
+
+---
+
 ## Reward Design
 
 ### The problem (v1/v2)
