@@ -57,6 +57,10 @@ class GameState:
     config: GameConfig
     blind_level: BlindLevel
     action_on_seat: int | None
+    # End offsets into action_history_this_hand for streets that have closed.
+    street_history_ends: tuple[int, ...] = ()
+    # Pot size at the start of each street, index 0 is preflop (antes only).
+    pots_entering_street: tuple[int, ...] = ()
 
     def view_for(self, seat: int) -> "GameState":
         """Return a state with hole cards hidden from other seats.
@@ -86,6 +90,8 @@ class GameState:
             last_raise_size=self.last_raise_size,
             action_history_this_street=self.action_history_this_street,
             action_history_this_hand=self.action_history_this_hand,
+            street_history_ends=self.street_history_ends,
+            pots_entering_street=self.pots_entering_street,
             deck_remaining_count=self.deck_remaining_count,
             config=self.config,
             blind_level=self.blind_level,
@@ -134,6 +140,8 @@ class GameState:
                 (seat, action.type.value, action.amount)
                 for seat, action in self.action_history_this_hand
             ],
+            "street_history_ends": list(self.street_history_ends),
+            "pots_entering_street": list(self.pots_entering_street),
             "deck_remaining_count": self.deck_remaining_count,
             "action_on_seat": self.action_on_seat,
             # config and blind_level handled separately by caller
@@ -215,6 +223,8 @@ class GameState:
             last_raise_size=cast(int, data["last_raise_size"]),
             action_history_this_street=action_history_this_street,
             action_history_this_hand=action_history_this_hand,
+            street_history_ends=tuple(cast(list[int], data.get("street_history_ends", []))),
+            pots_entering_street=tuple(cast(list[int], data.get("pots_entering_street", []))),
             deck_remaining_count=cast(int, data["deck_remaining_count"]),
             config=config,
             blind_level=blind_level,

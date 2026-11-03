@@ -6,7 +6,9 @@ from poker.bots.base import Bot
 from poker.domain.action import Action
 from poker.engine.action_validator import legal_actions, validate
 from poker.exceptions import IllegalActionError
-from poker.state.game_state import GameState, Street
+from poker.logging.events import InvalidAction
+from poker.logging.logger import Logger
+from poker.state.game_state import GameState
 
 
 _logger = logging.getLogger(__name__)
@@ -23,9 +25,15 @@ class ActionHandler:
         invalid_attempts: Dict tracking attempt count per bot per action.
     """
 
-    def __init__(self) -> None:
-        """Initialize action handler."""
+    def __init__(self, logger: Logger | None = None) -> None:
+        """Initialize action handler.
+
+        Args:
+            logger: Optional game logger. Invalid attempts are written there
+                as diagnostic events and are omitted from the hand transcript.
+        """
         self.invalid_attempts: dict[str, int] = {}  # Track attempts per bot
+        self._game_logger = logger
 
     def get_valid_action(
         self,
@@ -96,6 +104,18 @@ class ActionHandler:
                     error_msg,
                     action_str,
                 )
+                if self._game_logger is not None:
+                    self._game_logger.log_event(
+                        InvalidAction(
+                            hand_number=state.hand_number,
+                            seat=seat,
+                            street=state.street.value,
+                            attempt=attempt,
+                            bot=bot_name,
+                            action=action_str,
+                            error=error_msg,
+                        )
+                    )
 
                 # Record in history for error message
                 action_history.append(

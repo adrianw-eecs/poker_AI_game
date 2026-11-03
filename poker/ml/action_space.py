@@ -1,13 +1,30 @@
 """Action space definition and masking for PokerEnv."""
 
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 import numpy.typing as npt
 
 from poker.domain.action import Action, ActionType
-from poker.engine.action_validator import legal_actions
-from poker.state.game_state import GameState
+from poker.engine.action_validator import legal_actions, validate
+from poker.ml.encoder import dequantize_raise
+from poker.state.game_state import GameState, Street
+
+
+class BetScheme(Enum):
+    """How discrete raise buckets become chip amounts.
+
+    ``LEGACY`` is the original min-raise / all-in quantization. SD-CFR stays
+    on this scheme. ``POT_FRACTION`` sizes raises off the pot after a call.
+    """
+
+    LEGACY = "legacy"
+    POT_FRACTION = "pot_fraction"
+
+
+# Bucket 3, 4, 5 under POT_FRACTION. Bucket 2 is the minimum (or a 2.5bb open).
+_POT_FRACTIONS: dict[int, float] = {3: 0.5, 4: 1.0, 5: 2.0}
 
 
 @dataclass
@@ -54,7 +71,192 @@ class ActionSpace:
         return 0 <= action < self.num_actions
 
 
-def build_action_mask(state: GameState, seat: int) -> npt.NDArray[np.int32]:
+def min_raise_to(state: GameState, seat: int) -> int:
+    """Smallest legal raise-to for this seat, matching the action validator."""
+    player = state.players[seat]
+    to_call = state.current_bet_to_call
+    if player.committed_this_street >= to_call and to_call == 0:
+        return state.config.big_blind
+    increment = max(state.config.big_blind, state.last_raise_size)
+    return to_call + increment
+
+
+def capped_raise_bounds(
+    state: GameState, seat: int, max_bet: int
+) -> tuple[int, int] | None:
+    """Return (min_raise_to, max_raise_to) under an optional street-commitment cap.
+
+    ``max_bet`` of 0 leaves the ceiling at the player's stack. A positive cap
+    is the most chips this player may be committed for on the current street.
+    Returns None when no raise fits under that ceiling.
+    """
+    player = state.players[seat]
+    if player.stack <= 0:
+        return None
+    stack_to = player.stack + player.committed_this_street
+    ceiling = stack_to if max_bet <= 0 else min(stack_to, max_bet)
+    min_to = min_raise_to(state, seat)
+    if ceiling < min_to or min_to <= state.current_bet_to_call:
+        return None
+    return min_to, ceiling
+
+
+def cap_action(state: GameState, seat: int, action: Action, max_bet: int) -> Action:
+    """Shrink a raise or all-in so the street commitment stays within ``max_bet``.
+
+    A cap of 0 leaves the action unchanged. When the cap is too small for a
+    legal raise, the action becomes a call or a check.
+    """
+    if max_bet <= 0 or action.type not in (ActionType.RAISE, ActionType.ALL_IN):
+        return action
+    player = state.players[seat]
+    stack_to = player.stack + player.committed_this_street
+    to_call = state.current_bet_to_call
+    bounds = capped_raise_bounds(state, seat, max_bet)
+    if bounds is None:
+        if player.committed_this_street >= to_call:
+            return Action.check()
+        return Action.call(min(to_call, stack_to))
+    min_to, ceiling = bounds
+    amount = min(action.amount, ceiling)
+    if amount < min_to:
+        if player.committed_this_street >= to_call:
+            return Action.check()
+        return Action.call(min(to_call, stack_to))
+    if amount >= stack_to:
+        return Action.all_in(stack_to)
+    return Action.raise_to(amount)
+
+
+def _pot_size(state: GameState) -> int:
+    """Chips in the pots, falling back to commitments when pots are stale."""
+    pot = sum(pot.amount for pot in state.pots)
+    if pot > 0:
+        return pot
+    return sum(player.committed_this_hand for player in state.players)
+
+
+def _unopened_preflop(state: GameState) -> bool:
+    """True when the only live bet is the big blind."""
+    return (
+        state.street == Street.PREFLOP
+        and state.current_bet_to_call == state.config.big_blind
+        and state.last_raise_size == state.config.big_blind
+    )
+
+
+def pot_fraction_raise_to(
+    state: GameState, seat: int, bucket: int, max_bet: int = 0
+) -> int | None:
+    """Target raise-to for a pot-fraction bucket, or None when no raise fits.
+
+    Bucket 2 is the minimum legal raise, except an unopened preflop where it
+    opens to 2.5 big blinds. Buckets 3-5 are 50%, 100% and 200% of the pot
+    after the hero calls. Bucket 6 is all-in. The result is clamped to
+    ``[min_raise_to, ceiling]``.
+    """
+    player = state.players[seat]
+    if player.stack <= 0 or bucket < 2 or bucket > 6:
+        return None
+    bounds = capped_raise_bounds(state, seat, max_bet)
+    stack_to = player.stack + player.committed_this_street
+    if bucket == 6:
+        if player.stack <= 0:
+            return None
+        if bounds is None:
+            return stack_to
+        return bounds[1]
+    if bounds is None:
+        return None
+    min_to, ceiling = bounds
+    if bucket == 2 and _unopened_preflop(state):
+        target = int(round(2.5 * state.config.big_blind))
+    elif bucket == 2:
+        target = min_to
+    else:
+        fraction = _POT_FRACTIONS[bucket]
+        call_chips = max(0, state.current_bet_to_call - player.committed_this_street)
+        pot_after_call = _pot_size(state) + call_chips
+        target = state.current_bet_to_call + int(round(fraction * pot_after_call))
+    return min(ceiling, max(min_to, target))
+
+
+def _raise_action_for_amount(state: GameState, seat: int, amount: int) -> Action:
+    """Turn a clamped raise-to into a raise or an all-in."""
+    stack_to = state.players[seat].stack + state.players[seat].committed_this_street
+    if amount >= stack_to:
+        return Action.all_in(stack_to)
+    return Action.raise_to(amount)
+
+
+def _dedup_raise_mask(
+    mask: npt.NDArray[np.int32],
+    state: GameState,
+    seat: int,
+    max_bet: int,
+    scheme: BetScheme,
+) -> None:
+    """Clear a raise bucket whose clamped amount matches a cheaper bucket."""
+    seen: set[tuple[str, int]] = set()
+    for bucket in range(5):
+        index = 2 + bucket
+        if mask[index] == 0:
+            continue
+        try:
+            action = action_index_to_action(
+                index, state, seat, max_bet=max_bet, scheme=scheme
+            )
+        except ValueError:
+            mask[index] = 0
+            continue
+        key = (action.type.value, action.amount)
+        if key in seen:
+            mask[index] = 0
+        else:
+            seen.add(key)
+
+
+def _mask_pot_fraction(
+    state: GameState, seat: int, max_bet: int
+) -> npt.NDArray[np.int32]:
+    """Legal mask for pot-fraction buckets, with duplicate amounts removed."""
+    legal = legal_actions(state, seat)
+    mask = np.zeros(7, dtype=np.int32)
+    for action in legal:
+        if action.type == ActionType.FOLD:
+            mask[0] = 1
+        elif action.type in (ActionType.CHECK, ActionType.CALL):
+            mask[1] = 1
+
+    seen: set[int] = set()
+    call_actions = [action for action in legal if action.type == ActionType.CALL]
+    if call_actions:
+        seen.add(call_actions[0].amount)
+
+    for bucket in range(2, 7):
+        amount = pot_fraction_raise_to(state, seat, bucket, max_bet=max_bet)
+        if amount is None or amount in seen:
+            continue
+        action = _raise_action_for_amount(state, seat, amount)
+        try:
+            validate(state, seat, action)
+        except Exception:
+            continue
+        seen.add(amount)
+        mask[bucket] = 1
+
+    if mask.sum() == 0:
+        raise ValueError(f"No legal actions computed for seat {seat}")
+    return mask
+
+
+def build_action_mask(
+    state: GameState,
+    seat: int,
+    max_bet: int = 0,
+    scheme: BetScheme = BetScheme.LEGACY,
+    dedup: bool = False,
+) -> npt.NDArray[np.int32]:
     """Build a legal action mask for a player.
 
     Returns a binary mask of shape (7,) where mask[i] = 1 iff action i is legal.
@@ -69,6 +271,9 @@ def build_action_mask(state: GameState, seat: int) -> npt.NDArray[np.int32]:
     Raises:
         ValueError: If no legal actions exist.
     """
+    if scheme == BetScheme.POT_FRACTION:
+        return _mask_pot_fraction(state, seat, max_bet)
+
     legal = legal_actions(state, seat)
     mask = np.zeros(7, dtype=np.int32)
 
@@ -87,6 +292,22 @@ def build_action_mask(state: GameState, seat: int) -> npt.NDArray[np.int32]:
             # All-in is technically a raise. Allows choosing bucket 5 (max).
             mask[2:7] = 1
 
+    if max_bet > 0:
+        mask[2:7] = 0
+        bounds = capped_raise_bounds(state, seat, max_bet)
+        if bounds is not None:
+            min_to, ceiling = bounds
+            seen: set[int] = set()
+            for bucket in range(5):
+                amount = dequantize_raise(bucket, min_to, ceiling)
+                if amount in seen or amount < min_to or amount > ceiling:
+                    continue
+                seen.add(amount)
+                mask[2 + bucket] = 1
+
+    if dedup:
+        _dedup_raise_mask(mask, state, seat, max_bet, scheme)
+
     if mask.sum() == 0:
         raise ValueError(f"No legal actions computed for seat {seat}")
 
@@ -97,6 +318,8 @@ def action_index_to_action(
     action_index: int,
     state: GameState,
     seat: int,
+    max_bet: int = 0,
+    scheme: BetScheme = BetScheme.LEGACY,
 ) -> Action:
     """Convert a discrete action index to a concrete Action.
 
@@ -133,6 +356,23 @@ def action_index_to_action(
         raise ValueError("Check/Call is not legal")
 
     elif 2 <= action_index <= 6:  # Raise buckets
+        if scheme == BetScheme.POT_FRACTION:
+            amount = pot_fraction_raise_to(state, seat, action_index, max_bet=max_bet)
+            if amount is None:
+                raise ValueError("Raise is not legal")
+            return _raise_action_for_amount(state, seat, amount)
+
+        if max_bet > 0:
+            bounds = capped_raise_bounds(state, seat, max_bet)
+            if bounds is None:
+                raise ValueError("Raise is not legal")
+            min_to, ceiling = bounds
+            stack_to = state.players[seat].stack + state.players[seat].committed_this_street
+            amount = min(ceiling, max(min_to, dequantize_raise(action_index - 2, min_to, ceiling)))
+            if amount >= stack_to:
+                return Action.all_in(stack_to)
+            return Action.raise_to(amount)
+
         raise_actions = [a for a in legal if a.type in (ActionType.RAISE, ActionType.ALL_IN)]
         if not raise_actions:
             raise ValueError("Raise is not legal")

@@ -9,7 +9,8 @@ from poker.config.game_config import GameConfig
 from poker.domain.action import Action, ActionType
 from poker.domain.card import Card
 from poker.domain.deck import Deck
-from poker.logging.events import Event, EventEncoder
+from poker.logging.events import Event, EventEncoder, is_diagnostic
+from poker.logging.transcript import render_event
 from poker.state.game_state import GameState, Street
 from poker.state.player_state import PlayerState
 from poker.state.pot import Pot
@@ -56,6 +57,10 @@ class Replay:
             List of events for that hand.
         """
         return [e for e in self.events if hasattr(e, "hand_number") and e.hand_number == hand_number]
+
+    def _history_events(self, hand_number: int) -> list[Event]:
+        """Hand events with timing and invalid-action diagnostics removed."""
+        return [event for event in self.get_hand_events(hand_number) if not is_diagnostic(event)]
 
     def get_available_hands(self) -> set[int]:
         """Get set of available hand numbers in the log.
@@ -174,8 +179,8 @@ class Replay:
             )
 
         for event in hand_events:
-            # Note: Full state reconstruction would require re-implementing the
-            # entire hand engine logic. For now, we store events for manual replay.
+            # Full GameState reconstruction is intentionally not done here.
+            # The rendered text is the readable replay of the event list.
             progression.append((event, None))
 
         return {
@@ -183,6 +188,7 @@ class Replay:
             "events": hand_events,
             "progression": progression,
             "outcome": outcome,
+            "text": self.display_hand_summary(hand_number, config),
         }
 
     def display_hand_summary(
@@ -197,31 +203,15 @@ class Replay:
         Returns:
             A formatted string with hand summary.
         """
-        from poker.logging.events import HandEnded, HandStarted
-
-        hand_events = self.get_hand_events(hand_number)
+        hand_events = self._history_events(hand_number)
         if not hand_events:
             return f"No events found for hand {hand_number}"
 
-        hand_started = next(
-            (e for e in hand_events if isinstance(e, HandStarted)), None
-        )
-        hand_ended = next((e for e in hand_events if isinstance(e, HandEnded)), None)
-
-        lines = []
-        lines.append(f"Hand #{hand_number + 1}")
-
-        if hand_started:
-            lines.append(
-                f"  Dealer: Seat {hand_started.dealer_seat}, "
-                f"Blinds: {hand_started.small_blind}/{hand_started.big_blind}"
-            )
-
-        if hand_ended:
-            lines.append(f"  Distribution: {hand_ended.chip_distribution}")
-
-        lines.append(f"  Total events: {len(hand_events)}")
-
+        lines: list[str] = []
+        for event in hand_events:
+            rendered = render_event(event)
+            if rendered:
+                lines.append(rendered.rstrip("\n"))
         return "\n".join(lines)
 
     def interactive_replay(self, hand_number: int, config: GameConfig) -> None:
@@ -233,7 +223,7 @@ class Replay:
             hand_number: The hand number to replay.
             config: The game configuration.
         """
-        hand_events = self.get_hand_events(hand_number)
+        hand_events = self._history_events(hand_number)
         if not hand_events:
             print(f"No events found for hand {hand_number}")
             return
@@ -244,7 +234,9 @@ class Replay:
         step = 0
         while step < len(hand_events):
             event = hand_events[step]
-            print(f"[{step + 1}/{len(hand_events)}] {event}")
+            rendered = render_event(event)
+            shown = rendered.rstrip("\n") if rendered else type(event).__name__
+            print(f"[{step + 1}/{len(hand_events)}] {shown}")
 
             try:
                 command = input("(n=next, p=prev, q=quit, j=jump): ").strip().lower()

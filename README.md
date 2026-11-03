@@ -7,8 +7,25 @@ A No-Limit Texas Hold'em engine in Python designed as a simulation environment f
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
-python main.py
+pip install -e ".[dev]"
+python -m poker.main -n 6 --hands 20 --seed 1 --bots human nfsp:models/nfsp_v2/nfsp_v2.pt sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt random random flop
+```
+
+Current checkpoints (verified 2026-11-03):
+
+- NFSP: `models/nfsp_v2/nfsp_v2.pt` — obs v2, 318-wide, pot-fraction sizing
+- SD-CFR: `models/sdcfr_prod/sdcfr_ckpt_500.pt` — obs v1, 98-wide, legacy sizing
+
+These are the only two checkpoints kept. Older runs (`nfsp_prod`, `multihand`,
+`nfsp_multiplayer`, `NFSP_reworked`, `nfsp_v3*`, and the root-level `nfsp_4player*` /
+`sdcfr_ckpt_*` files) were removed on 2026-11-03. Note there is **no v3
+checkpoint**: the deleted `nfsp_v3*.pt` files used the retired 155-wide observation
+and predated the current architecture.
+
+Score a full table, including whether bets match the cards:
+
+```bash
+python scripts/validate_training.py --hands 200 --seed 1 --bots nfsp:models/nfsp_v2/nfsp_v2.pt sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt random flop
 ```
 
 ---
@@ -64,9 +81,17 @@ The raise increment must be at least equal to the largest previous bet or raise 
 Before any raise, the minimum opening raise is equal to the big blind.
 
 **The half-raise (all-in) rule:**
-If a player goes all-in for an amount that is **less than a full minimum raise** but **at least 50% of the minimum raise**, the bet is called a "short all-in." A short all-in does **not** re-open the betting for players who have already acted — they may only call or fold. A player who has not yet acted, or who made the last full raise, retains the right to re-raise.
 
-If a player goes all-in for an amount that is **less than 50% of the minimum raise**, it is treated purely as a call-size all-in and does not re-open betting for anyone.
+If a player goes all-in for **less than a full minimum raise**, it is a "short
+all-in" and does **not** re-open the betting. A player who has already acted in
+that round may only call or fold; they may not re-raise. A player who has not yet
+acted still has all options.
+
+> **Known deviation.** `reopens_betting()` computes this correctly, but
+> `legal_actions()` does not yet consult it when building the raise option, so the
+> engine still offers a raise to a player facing a short all-in. The engine is
+> therefore slightly more permissive than real Hold'em in this one spot. Fixing it
+> is tracked in `docs/PROJECT_STATUS.md`.
 
 **Maximum raise:**
 In No-Limit, a player may raise any amount up to their entire remaining stack (all-in).
@@ -76,11 +101,10 @@ There is no cap on the number of raises per street in No-Limit Hold'em (caps are
 
 **Summary table:**
 
-| All-in raise amount | Re-opens betting? |
-|---|---|
-| ≥ full minimum raise | Yes, for all remaining players |
-| ≥ 50% but < full min raise | No — only players who haven't yet acted |
-| < 50% of minimum raise | No — treated as a call |
+| All-in raise amount | Re-opens betting? | Engine behaviour |
+|---|---|---|
+| ≥ full minimum raise | Yes, for all remaining players | Correct |
+| < full minimum raise | No — prior actors may only call/fold | **Not enforced for the raise option** |
 
 ### Pot Management & Rake
 
@@ -98,39 +122,11 @@ There is no cap on the number of raises per street in No-Limit Hold'em (caps are
 
 ## ML Environment
 
-The `ml/poker_env.py` module exposes a Gym-compatible interface:
-
-```python
-from ml.poker_env import PokerEnv
-from config.game_config import GameConfig
-from bots.random_bot import RandomBot
-
-env = PokerEnv(config=GameConfig(), bots=[RandomBot(), RandomBot()])
-obs = env.reset()
-obs, reward, done, info = env.step(action)
-```
-
-### Observation Space
-Fixed-length numpy array encoding:
-- Hole cards (2 cards, one-hot encoded)
-- Community cards (5 cards, one-hot encoded, padded until revealed)
-- Current pot (normalized to starting stack)
-- Each player's stack (normalized)
-- Seat position relative to dealer
-- Amount to call (normalized)
-- Current street (0=pre-flop, 1=flop, 2=turn, 3=river)
-- Betting history for current street (last N actions encoded)
-- **Per-player history: last 10 hands** — for each player, encodes outcome (won/lost), chips won/lost, and simplified action sequence (VPIP, aggression) over their last 10 hands
-
-### Action Space
-- `0` — Fold
-- `1` — Check
-- `2` — Call
-- `3` — Raise (paired with a continuous value: raise fraction of pot, e.g. 0.5 = half-pot)
-- `4` — All-in
-
-### Reward
-Change in chip stack at end of hand, normalized to `starting_stack`. Zero during a hand; delivered at `done=True`.
+`poker.ml.env.PokerEnv` is the Gymnasium environment. Two observation encoders exist:
+v1 is 98 floats (nine seat slots zero-filled, so 2–9 players share one input size),
+and v2 is 318 floats (hero-relative, card ids in their own block, pot-fraction
+friendly). Actions are seven discrete choices: fold, check/call, and five raise
+buckets. See `docs/ML.md` and `docs/TRAINING.md`.
 
 ---
 
@@ -155,7 +151,10 @@ docs/
 ├── PROJECT_STATUS.md  # Current state, how to run, known issues
 ├── ENGINE.md          # Architecture deep dive (data structures, betting, showdown)
 ├── ML.md              # ML environment: PokerEnv, observations, models
-├── TRAINING.md        # Full training guide: NFSP, SD-CFR, parallel training
+├── TRAINING.md        # Training and validation guide: NFSP, SD-CFR
+├── HYBRID_PLAN.md     # SD-CFR-as-teacher design for a unified model
+├── NFSP_Notes.md      # NFSP paper/reference-implementation notes
+├── SD-CFR_Notes.md    # SD-CFR notes
 ├── BOTS.md            # Available bots, how to add one
 └── USER_NOTES.md      # Stable design decisions
 ```
@@ -163,4 +162,5 @@ docs/
 **Start here:**
 - [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) — what works, how to run it
 - [docs/TRAINING.md](docs/TRAINING.md) — ML training (NFSP/SD-CFR) guide
+- [docs/HYBRID_PLAN.md](docs/HYBRID_PLAN.md) — combined NFSP + SD-CFR design
 - [docs/ENGINE.md](docs/ENGINE.md) — engine architecture and internals

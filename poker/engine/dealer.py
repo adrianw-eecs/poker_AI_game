@@ -24,16 +24,24 @@ def deal_hole_cards(
         A new tuple of PlayerState objects with hole cards dealt.
     """
     num_players = len(players)
+    eligible = [seat for seat, player in enumerate(players) if not player.is_eliminated]
+    if not eligible:
+        return players
 
-    # Find the starting seat (small blind, left of button)
+    # Deal clockwise starting at the first live seat left of the button.
     start_seat = (button_seat + 1) % num_players
+    for _ in range(num_players):
+        if not players[start_seat].is_eliminated:
+            break
+        start_seat = (start_seat + 1) % num_players
 
-    # Deal 2 cards to each player in order
     dealt_players = list(players)
-    for i in range(num_players):
-        seat = (start_seat + i) % num_players
-        cards = deck.deal(2)
-        dealt_players[seat] = dealt_players[seat].with_hole_cards(tuple(cards))
+    seat = start_seat
+    for _ in range(len(eligible)):
+        while players[seat].is_eliminated:
+            seat = (seat + 1) % num_players
+        dealt_players[seat] = dealt_players[seat].with_hole_cards(tuple(deck.deal(2)))
+        seat = (seat + 1) % num_players
 
     return tuple(dealt_players)
 
@@ -104,9 +112,10 @@ def deal_run_it_twice(
     their win rate across both boards.
 
     Args:
-        deck: The deck to deal from (must have enough cards for 2 x remaining_streets).
+        deck: The deck to deal from (must have enough cards for 2 x remaining cards).
         current_board: The community cards already revealed.
-        remaining_streets: Number of streets left to deal (1 for turn, 2 for turn+river).
+        remaining_streets: Number of streets left to deal (1, 2, or 3). A flop
+            run-out deals three cards, so this is street count, not card count.
 
     Returns:
         A tuple of two boards, each as a tuple of Cards.
@@ -114,25 +123,27 @@ def deal_run_it_twice(
     if remaining_streets < 1:
         raise ValueError("remaining_streets must be at least 1")
 
-    if remaining_streets > 2:
-        raise ValueError("remaining_streets must be at most 2")
+    # Three remaining streets means a preflop all-in: flop, turn and river.
+    # The old guard rejected >2, so every preflop all-in crashed.
+    if remaining_streets > 3:
+        raise ValueError("remaining_streets must be at most 3")
 
-    # Deal cards for the first run-out
-    run1_cards: list[Card] = []
-    for _ in range(remaining_streets):
-        deck.deal(1)  # Burn
-        cards = deck.deal(1)
-        run1_cards.extend(cards)
+    # Street sizes still to come. remaining_streets counts streets, and a flop
+    # is three cards, so a preflop run-out deals 5 cards, not 3.
+    if remaining_streets == 3:
+        street_sizes = (3, 1, 1)
+    elif remaining_streets == 2:
+        street_sizes = (1, 1)
+    else:
+        street_sizes = (1,)
 
-    board1 = current_board + tuple(run1_cards)
+    def _run_out() -> tuple[Card, ...]:
+        drawn: list[Card] = []
+        for street_size in street_sizes:
+            deck.deal(1)  # Burn before each street's cards.
+            drawn.extend(deck.deal(street_size))
+        return tuple(drawn)
 
-    # Deal cards for the second run-out from remaining deck
-    run2_cards: list[Card] = []
-    for _ in range(remaining_streets):
-        deck.deal(1)  # Burn
-        cards = deck.deal(1)
-        run2_cards.extend(cards)
-
-    board2 = current_board + tuple(run2_cards)
-
+    board1 = current_board + _run_out()
+    board2 = current_board + _run_out()
     return (board1, board2)

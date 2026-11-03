@@ -64,6 +64,7 @@ class GameLogger:
         self.filepath = Path(filepath)
         self.filepath.parent.mkdir(parents=True, exist_ok=True)
         self._buffer: list[str] = []
+        self._seq = 0
 
     def log_event(self, event: Event) -> None:
         """Buffer an event for writing.
@@ -72,6 +73,8 @@ class GameLogger:
             event: The event to log.
         """
         data = EventEncoder.to_dict(event)
+        data["seq"] = self._seq
+        self._seq += 1
         json_line = json.dumps(data)
         self._buffer.append(json_line)
 

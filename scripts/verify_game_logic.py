@@ -12,7 +12,7 @@ Checks:
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 from poker.ml.env import PokerEnv
@@ -85,7 +85,7 @@ def test_turn_order():
         opponent_bots=[RandomBot(), RandomBot()],
         small_blind=25,
         big_blind=50,
-        seed=42
+        seed=None
     )
 
     actions_taken = 0

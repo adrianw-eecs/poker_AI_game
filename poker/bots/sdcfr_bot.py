@@ -3,9 +3,14 @@
 import numpy as np
 import numpy.typing as npt
 
+from poker.bots.progress import ensure_progressing_action
 from poker.domain.action import Action
 from poker.engine.action_validator import legal_actions as compute_legal_actions
-from poker.ml.action_space import action_index_to_action, action_to_action_index, build_action_mask
+from poker.ml.action_space import (
+    BetScheme,
+    action_index_to_action,
+    action_to_action_index,
+)
 from poker.ml.models.sdcfr_model import SDCFRModel
 from poker.ml.observation import build_observation
 from poker.state.game_state import GameState
@@ -26,6 +31,8 @@ class SDCFRBot:
     ) -> None:
         self._name = name
         self.model = model if model is not None else SDCFRModel(**model_kwargs)
+        # Frozen SD-CFR checkpoints were trained on the legacy bet buckets.
+        self.bet_scheme = BetScheme.LEGACY
         self._seat_cache: int | None = None
         self._last_state_id: int | None = None
 
@@ -57,7 +64,10 @@ class SDCFRBot:
             legal_indices = np.where(legal_mask)[0]
             action_idx = int(np.random.choice(legal_indices))
 
-        return action_index_to_action(action_idx, state, seat)
+        chosen = action_index_to_action(
+            action_idx, state, seat, scheme=BetScheme.LEGACY
+        )
+        return ensure_progressing_action(state, chosen, legal)
 
     def observe_result(self, final_state: GameState, reward: float) -> None:
         """No-op: SD-CFR trains offline via traversals, not online feedback."""

@@ -31,6 +31,18 @@ def test_community_cards_dealt() -> None:
     assert deck.remaining() == 32  # 52 - 12 - 4 - 2 - 2
 
 
+def test_eliminated_seat_is_not_dealt() -> None:
+    from dataclasses import replace
+
+    players = list(_players(6))
+    players[2] = replace(players[2], stack=0, is_eliminated=True)
+    deck = Deck(RNG(seed=42))
+    dealt = deal_hole_cards(deck, tuple(players), button_seat=0)
+    assert dealt[2].hole_cards == ()
+    assert all(len(dealt[i].hole_cards) == 2 for i in range(6) if i != 2)
+    assert deck.remaining() == 42
+
+
 def test_full_deal_no_duplicates() -> None:
     deck = Deck(RNG(seed=42))
     dealt = deal_hole_cards(deck, _players(6), button_seat=0)

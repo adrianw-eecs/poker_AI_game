@@ -13,6 +13,7 @@ if sys.platform == "win32":
 from poker.bots.base import Bot
 from poker.bots.flop_bot import FlopBot
 from poker.bots.human_bot import HumanBot
+from poker.bots.nn_bot import NNBot, load_model as load_nn_model
 from poker.bots.random_bot import RandomBot
 from poker.config.blind_schedule import BlindLevel, BlindSchedule
 from poker.config.game_config import GameConfig
@@ -64,6 +65,149 @@ def _create_blind_schedule(
     )
 
 
+_BOT_KINDS = {
+    "human": "human",
+    "random": "random",
+    "random_bot": "random",
+    "flop": "flop",
+    "flop_bot": "flop",
+    "nfsp": "nfsp",
+    "nfsp_bot": "nfsp",
+    "sdcfr": "sdcfr",
+    "sdcfr_bot": "sdcfr",
+    "nn": "nn",
+    "nn_bot": "nn",
+    "linear_bot": "linear",
+    "deep_bot": "deep",
+    "tree_bot": "tree",
+}
+
+
+def _split_bot_token(token: str) -> tuple[str, str | None]:
+    """Return (kind, inline checkpoint path or None)."""
+    kind_token, sep, path = token.partition(":")
+    kind = _BOT_KINDS.get(kind_token.strip().lower())
+    if kind is None:
+        known = ", ".join(sorted(set(_BOT_KINDS)))
+        raise ValueError(f"Unknown bot '{token}'. Expected one of: {known}")
+    inline = path.strip() if sep else None
+    if inline == "":
+        raise ValueError(f"Bot '{token}' is missing a checkpoint path after ':'")
+    return kind, inline
+
+
+def _take_checkpoint(kind: str, inline: str | None, queued: list[str], seat: int) -> str:
+    if inline is not None:
+        return inline
+    if queued:
+        return queued.pop(0)
+    flag = {"nfsp": "--nfsp-model", "sdcfr": "--sdcfr-model", "nn": "--nn-model"}[kind]
+    raise ValueError(
+        f"Seat {seat} ({kind}) needs a checkpoint. "
+        f"Use {kind}:PATH or {flag}."
+    )
+
+
+def _require_checkpoint(path: str) -> Path:
+    checkpoint = Path(path)
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {checkpoint}")
+    return checkpoint
+
+
+class _ModelCache:
+    """Load each checkpoint path once and reuse it across seats."""
+
+    def __init__(self) -> None:
+        self._nfsp: dict[str, object] = {}
+        self._sdcfr: dict[str, object] = {}
+
+    def nfsp(self, path: str):
+        from poker.ml.models.nfsp_model import NFSPModel
+
+        key = str(_require_checkpoint(path).resolve())
+        model = self._nfsp.get(key)
+        if model is None:
+            model = NFSPModel()
+            model.load(key)
+            self._nfsp[key] = model
+        return model
+
+    def sdcfr(self, path: str):
+        from poker.ml.models.sdcfr_model import SDCFRModel
+
+        key = str(_require_checkpoint(path).resolve())
+        model = self._sdcfr.get(key)
+        if model is None:
+            model = SDCFRModel()
+            model.load(key)
+            self._sdcfr[key] = model
+        return model
+
+
+def _build_bots(
+    tokens: list[str],
+    nfsp_paths: list[str],
+    sdcfr_paths: list[str],
+    nn_paths: list[str],
+    seed: int | None,
+) -> dict[int, Bot]:
+    """Build one bot per seat token. Identical checkpoint paths share one model."""
+    cache = _ModelCache()
+    bots: dict[int, Bot] = {}
+    human_count = 0
+
+    for seat, token in enumerate(tokens):
+        kind, inline = _split_bot_token(token)
+        if kind == "human":
+            human_count += 1
+            name = "Human" if human_count == 1 else f"Human{human_count}"
+            bots[seat] = HumanBot(seat=seat, name=name)
+        elif kind == "random":
+            bots[seat] = RandomBot(name=f"RandomBot{seat + 1}", seed=seed)
+        elif kind == "flop":
+            bots[seat] = FlopBot(name=f"FlopBot{seat + 1}")
+        elif kind == "nfsp":
+            from poker.bots.nfsp_bot import NFSPBot
+
+            path = _take_checkpoint(kind, inline, nfsp_paths, seat)
+            model = cache.nfsp(path)
+            bots[seat] = NFSPBot(name=f"NFSPBot{seat + 1}", model=model, training=False)
+        elif kind == "sdcfr":
+            from poker.bots.sdcfr_bot import SDCFRBot
+
+            path = _take_checkpoint(kind, inline, sdcfr_paths, seat)
+            model = cache.sdcfr(path)
+            bots[seat] = SDCFRBot(name=f"SDCFRBot{seat + 1}", model=model)
+        elif kind == "nn":
+            path = _take_checkpoint(kind, inline, nn_paths, seat)
+            model = load_nn_model(path)
+            bots[seat] = NNBot(name=f"NNBot{seat + 1}", model=model)
+        elif kind == "linear":
+            from poker.bots.linear_bot import LinearBot
+            from poker.ml.models.linear_q import LinearQModel
+
+            model = LinearQModel()
+            model.load("models/linear_q.pkl")
+            bots[seat] = LinearBot(name=f"LinearBot{seat + 1}", model=model)
+        elif kind == "deep":
+            from poker.bots.deep_bot import DeepBot
+            from poker.ml.models.deep_q import DeepQModel
+
+            model = DeepQModel()
+            model.load("models/deep_q.pt")
+            bots[seat] = DeepBot(name=f"DeepBot{seat + 1}", model=model)
+        else:
+            from poker.bots.tree_bot import TreeBot
+            from poker.ml.models.tree_q import TreeQModel
+
+            model = TreeQModel()
+            model.load("models/tree_q.pkl")
+            bots[seat] = TreeBot(name=f"TreeBot{seat + 1}", model=model)
+
+    return bots
+
+
 def main() -> int:
     """Main entry point for the poker game CLI.
 
@@ -83,7 +227,7 @@ def main() -> int:
         "--num-players",
         type=int,
         default=2,
-        help="Number of players (2-6, default: 2)",
+        help="Number of players (2-9, default: 2)",
     )
     parser.add_argument(
         "-s",
@@ -160,13 +304,30 @@ def main() -> int:
         type=str,
         nargs="*",
         default=None,
-        help="Bot types for each seat: random, human, flop_bot, nfsp_bot (default: all random)",
+        help=(
+            "One seat token per player, in seat order. "
+            "Kinds: human, random, flop, nfsp, sdcfr, nn. "
+            "Model seats accept an inline checkpoint (nfsp:PATH, sdcfr:PATH, nn:PATH). "
+            "Default: every seat is random."
+        ),
     )
     parser.add_argument(
         "--nfsp-model",
-        type=str,
+        action="append",
         default=None,
-        help="Path to NFSP model checkpoint (.pt file) for nfsp_bot. If not specified, uses models/nfsp.pt",
+        help="NFSP checkpoint for the next nfsp seat that has no inline path. Repeat for several models.",
+    )
+    parser.add_argument(
+        "--sdcfr-model",
+        action="append",
+        default=None,
+        help="SDCFR checkpoint for the next sdcfr seat that has no inline path. Repeat for several models.",
+    )
+    parser.add_argument(
+        "--nn-model",
+        action="append",
+        default=None,
+        help="Checkpoint for the next nn seat that has no inline path. The network is not implemented yet.",
     )
     parser.add_argument(
         "--rake",
@@ -205,8 +366,8 @@ def main() -> int:
 
     try:
         # Validate player count
-        if not 2 <= args.num_players <= 10:
-            print(f"Error: num_players must be 2-10, got {args.num_players}")
+        if not 2 <= args.num_players <= 9:
+            print(f"Error: num_players must be 2-9, got {args.num_players}")
             return 1
 
         # Create game config
@@ -246,10 +407,10 @@ def main() -> int:
         games_dir = Path("games/AI_games")
         games_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        action_handler = ActionHandler()
         transcript_logger = SessionTextLogger(games_dir / f"session_{ts}.txt", seed=args.seed)
 
         logger = MultiLogger([event_logger, transcript_logger])
+        action_handler = ActionHandler(logger)
 
         # Create session
         session = Session(
@@ -258,51 +419,24 @@ def main() -> int:
             session_config=session_config,
             logger=logger,
             action_handler=action_handler,
+            seed=args.seed,
         )
 
-        # Create bots
-        bots: dict[int, Bot] = {}
-        bot_types = args.bots or ["random"] * args.num_players
-
-        for seat, bot_type in enumerate(bot_types[: args.num_players]):
-            if bot_type == "human":
-                bots[seat] = HumanBot(seat=seat)
-            elif bot_type == "flop_bot":
-                bots[seat] = FlopBot(name=f"FlopBot{seat + 1}")
-            elif bot_type == "linear_bot":
-                from poker.bots.linear_bot import LinearBot
-                from poker.ml.models.linear_q import LinearQModel
-                model = LinearQModel()
-                model.load("models/linear_q.pkl")
-                bots[seat] = LinearBot(name=f"LinearBot{seat + 1}", model=model)
-            elif bot_type == "deep_bot":
-                from poker.bots.deep_bot import DeepBot
-                from poker.ml.models.deep_q import DeepQModel
-                model = DeepQModel()
-                model.load("models/deep_q.pt")
-                bots[seat] = DeepBot(name=f"DeepBot{seat + 1}", model=model)
-            elif bot_type == "tree_bot":
-                from poker.bots.tree_bot import TreeBot
-                from poker.ml.models.tree_q import TreeQModel
-                model = TreeQModel()
-                model.load("models/tree_q.pkl")
-                bots[seat] = TreeBot(name=f"TreeBot{seat + 1}", model=model)
-            elif bot_type == "nfsp_bot":
-                from poker.bots.nfsp_bot import NFSPBot
-                from poker.ml.models.nfsp_model import NFSPModel
-                model = NFSPModel()
-                model_path = args.nfsp_model or "models/nfsp.pt"
-                model.load(model_path)
-                bots[seat] = NFSPBot(name=f"NFSPBot{seat + 1}", model=model)
-            elif bot_type == "sdcfr_bot":
-                from poker.bots.sdcfr_bot import SDCFRBot
-                from poker.ml.models.sdcfr_model import SDCFRModel
-                model = SDCFRModel()
-                model.load("models/sdcfr.pt")
-                bots[seat] = SDCFRBot(name=f"SDCFRBot{seat + 1}", model=model)
-            else:  # default to random
-                # Pass seed to RandomBot for reproducibility
-                bots[seat] = RandomBot(name=f"RandomBot{seat + 1}", seed=args.seed)
+        # Create bots. Model checkpoints are loaded once per distinct path.
+        bot_tokens = args.bots if args.bots else ["random"] * args.num_players
+        if len(bot_tokens) != args.num_players:
+            print(
+                f"Error: --num-players is {args.num_players} but --bots has "
+                f"{len(bot_tokens)} seat(s)"
+            )
+            return 1
+        bots = _build_bots(
+            bot_tokens,
+            list(args.nfsp_model or []),
+            list(args.sdcfr_model or []),
+            list(args.nn_model or []),
+            args.seed,
+        )
 
         # Create initial state
         state = session.create_initial_state(args.num_players)
@@ -311,6 +445,8 @@ def main() -> int:
         print("Texas Hold'em Poker Engine")
         print("=" * 60)
         print(f"Players: {args.num_players}")
+        for seat in range(args.num_players):
+            print(f"  Seat {seat}: {bots[seat].name}")
         print(f"Starting stack: {args.starting_stack}")
         print(f"Blinds: {args.small_blind}/{args.big_blind}")
         if args.ante:

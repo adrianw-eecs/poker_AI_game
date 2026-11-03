@@ -428,9 +428,29 @@ for seat in non_folded:
 
 ## References
 
-- **GameState**: `src/poker/state/game_state.py`
-- **Session**: `src/poker/engine/session.py`
-- **Betting**: `src/poker/engine/betting_round.py`
-- **Hand Flow**: `src/poker/engine/hand_engine.py`
-- **Showdown**: `src/poker/engine/showdown.py`
-- **Evaluation**: `src/poker/evaluation/evaluator.py`
+- **GameState**: `poker/state/game_state.py`
+- **Session**: `poker/engine/session.py`
+- **Betting**: `poker/engine/betting_round.py`
+- **Pure rules**: `poker/engine/rules.py`
+- **Hand Flow**: `poker/engine/hand_engine.py`
+- **Showdown**: `poker/engine/showdown.py`
+- **Evaluation**: `poker/evaluation/evaluator.py`
+
+---
+
+## Known Rule Deviation
+
+`BettingRound` tracks re-opening correctly: `reopens_betting(action, prior_max,
+prior_min)` returns True for a raise, and for an all-in only when
+`action.amount - prior_max >= prior_min`. `round_is_closed()` uses that to decide
+whether prior actors must act again.
+
+However, `legal_actions()` does **not** consult the re-open state when building the
+raise option. A player facing a short all-in is therefore still offered a raise,
+where real NLHE permits only call or fold. The betting round still *closes* correctly
+(the player is not forced to act if they choose to call), so this is a legal-action
+surface deviation rather than a chip-accounting bug.
+
+Fix direction: pass the "betting was re-opened?" flag into `legal_actions()` and
+suppress `Action.raise_to(...)` when the most recent aggressive action was a short
+all-in from a player who is now all-in.

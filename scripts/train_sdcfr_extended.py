@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from poker.config.blind_schedule import BlindLevel, BlindSchedule
 from poker.config.game_config import GameConfig
@@ -46,11 +46,12 @@ def main() -> None:
         print("[WARNING] No GPU detected - training will be slow")
 
     parser = argparse.ArgumentParser(description="Extended SD-CFR training (10K iterations)")
+    parser.add_argument("--model-name", type=str, default="sdcfr_extended",
+                        help="Model folder name (e.g. 'sdcfr_extended' creates models/sdcfr_extended/).")
     parser.add_argument("--num-players", type=int, default=2)
     parser.add_argument("--cfr-iterations", type=int, default=10_000)
     parser.add_argument("--traversals-per-iteration", type=int, default=1000)
     parser.add_argument("--checkpoint-every", type=int, default=500)
-    parser.add_argument("--save-path", type=str, default="models/sdcfr_extended.pt")
     parser.add_argument("--seed", type=int, default=None, help="Random seed (None for no seeding)")
     parser.add_argument(
         "--warmstart",
@@ -71,7 +72,12 @@ def main() -> None:
     print(f"Checkpoints every: {args.checkpoint_every:,} iterations")
     print(f"Expected time: ~3-4 hours on RTX 3080\n")
 
-    config, blind_schedule = build_config(args.num_players)
+    # Create model folder (like NFSP: models/{model_name}/)
+    models_dir = Path("models") / args.model_name
+    models_dir.mkdir(parents=True, exist_ok=True)
+    save_path = models_dir / "sdcfr.pt"
+
+    config, _ = build_config(args.num_players)
     model = SDCFRModel()
 
     if args.warmstart is not None:
@@ -80,13 +86,11 @@ def main() -> None:
 
     traverser = ExternalSamplingTraverser(
         config=config,
-        blind_schedule=blind_schedule,
         advantage_network=model.advantage_network,
         device=model.device,
         regret_buffer=model.regret_buffer,
     )
 
-    os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
     start_time = time.time()
     iteration_times = []
 
@@ -118,18 +122,19 @@ def main() -> None:
 
         # Periodic checkpointing
         if iteration > 0 and iteration % args.checkpoint_every == 0:
-            ckpt_path = str(Path(args.save_path).parent / f"sdcfr_ckpt_{iteration:06d}.pt")
-            model.save(ckpt_path)
+            ckpt_path = models_dir / f"sdcfr_ckpt_{iteration:06d}.pt"
+            model.save(str(ckpt_path))
             print(f"  → Checkpoint saved: {ckpt_path}")
 
-    model.save(args.save_path)
+    model.save(str(save_path))
     elapsed = time.time() - start_time
 
     print(f"\n{'='*70}")
     print(f"Extended training complete!")
     print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f}m = {elapsed/3600:.1f}h)")
     print(f"Avg time per iteration: {np.mean(iteration_times):.2f}s")
-    print(f"Saved final model to {args.save_path}")
+    print(f"Model folder: {models_dir}")
+    print(f"Final model: {save_path}")
     print(f"{'='*70}\n")
 
 

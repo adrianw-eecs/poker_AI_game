@@ -54,14 +54,17 @@ games/
 *.txt
 
 # ── ML model artifacts ────────────────────────────────────────────────────────
-models/
-data/
+# Anchor to the repo root. An unanchored "models/" also matched the source
+# package poker/ml/models/, so those .py files were silently untracked and a
+# bad overwrite of nfsp_model.py had no git history to restore from.
+/models/
+/data/
 *.pt
 *.pth
 *.pkl
 *.npz
-checkpoints/
-replays/
+/checkpoints/
+/replays/
 
 # ── Claude Code project files ─────────────────────────────────────────────────
 .claude/

@@ -333,3 +333,66 @@ def test_eliminated_player_skips_betting_actions():
     assert len(final_state.players) == 3
     # Eliminated player should remain eliminated
     assert final_state.players[1].is_eliminated
+    assert final_state.players[1].hole_cards == ()
+
+
+def test_two_live_seats_play_heads_up():
+    """Busted seats are not dealt or blinded. The button posts and acts first."""
+    sched = BlindSchedule(
+        levels=[BlindLevel(small=5, big=10)],
+        hands_per_level=100,
+        fixed=True,
+    )
+    config = GameConfig(
+        num_players=6,
+        starting_stack=1000,
+        small_blind=5,
+        big_blind=10,
+        ante=0,
+        rake_percent=0.0,
+        rake_cap=None,
+        blind_schedule=sched,
+    )
+    session = Session(
+        config=config,
+        blind_schedule=sched,
+        session_config=SessionConfig(duration_hands=None),
+        logger=NullLogger(),
+    )
+    state = session.create_initial_state(6)
+    players = list(state.players)
+    for seat in (1, 2, 3, 4):
+        players[seat] = replace(players[seat], stack=0, is_eliminated=True)
+    state = replace(state, players=tuple(players), dealer_seat=0)
+
+    first_actor: list[int] = []
+
+    class RecordingBot(Bot):
+        def __init__(self, seat: int):
+            self._seat = seat
+
+        @property
+        def name(self) -> str:
+            return f"P{self._seat}"
+
+        def act(self, game: GameState, legal: list[Action]) -> Action:
+            if not first_actor and game.action_on_seat is not None:
+                first_actor.append(game.action_on_seat)
+            return Action.fold()
+
+        def observe_result(self, final_state: GameState, reward: float) -> None:
+            pass
+
+    bots: dict[int, Bot] = {seat: RecordingBot(seat) for seat in range(6)}
+    final_state = play_hand(state, bots, Deck(RNG(seed=1)), NullLogger())
+
+    for seat in (1, 2, 3, 4):
+        assert final_state.players[seat].hole_cards == ()
+        assert final_state.players[seat].stack == 0
+        assert final_state.players[seat].committed_this_hand == 0
+    assert len(final_state.players[0].hole_cards) == 2
+    assert len(final_state.players[5].hole_cards) == 2
+    assert first_actor == [0]
+    # Button posted 5 and folded. Big blind (seat 5) keeps the matched pot.
+    assert final_state.players[0].stack == 995
+    assert final_state.players[5].stack == 1005

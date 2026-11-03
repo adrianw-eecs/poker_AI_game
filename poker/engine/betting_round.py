@@ -5,11 +5,30 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from poker.domain.action import Action, ActionType
-from poker.logging.events import ActionTaken, TimingEvent
+from poker.logging.events import ActionTaken, PlayerOut, TimingEvent
 from poker.logging.logger import Logger
-from poker.logging.state_snapshot import format_action_log_line
+from poker.logging.state_snapshot import position_label
+from poker.engine.rules import (
+    advance_action,
+    apply_action,
+    count_active_players,
+    focus_action,
+    reopens_betting,
+    round_is_closed,
+)
 from poker.state.game_state import GameState
-from poker.state.pot_manager import rebuild_pots
+from poker.state.pot_manager import rebuild_pots, return_uncalled_bet
+
+
+def _action_label(action: Action, had_bet: bool) -> str:
+    """Map an engine action to a hand-history verb.
+
+    The first voluntary raise on a street with no bet yet is a bet.
+    The stored action_type stays ``raise``.
+    """
+    if action.type == ActionType.RAISE and not had_bet:
+        return "bet"
+    return action.type.value
 
 
 class BettingRound:
@@ -28,6 +47,7 @@ class BettingRound:
         state: GameState,
         get_action: Callable[[int, GameState], Action],
         logger: Logger,
+        names: dict[int, str] | None = None,
     ) -> None:
         """Initialize a betting round.
 
@@ -36,10 +56,12 @@ class BettingRound:
             get_action: Callable that takes (seat, state) and returns an Action.
                         Called once per player per street until round closes.
             logger: Logger to emit ActionTaken events.
+            names: Optional seat → display name. Falls back to PlayerState.name.
         """
         self.state = state
         self.get_action = get_action
         self.logger = logger
+        self.names = names or {}
         # Track which players have acted at least once in this round
         self.players_acted_this_round: set[int] = set()
         # Track the highest bet to know when all players have matched
@@ -69,7 +91,11 @@ class BettingRound:
                 break
 
             seat = self.state.action_on_seat
-            committed_before = self.state.players[seat].committed_this_hand
+            actor = self.state.players[seat]
+            committed_before = actor.committed_this_hand
+            stack_before = actor.stack
+            to_call_before = self.state.current_bet_to_call
+            had_bet = to_call_before > 0
             t0 = time.perf_counter()
             action = self.get_action(seat, self.state)
             elapsed_us = int((time.perf_counter() - t0) * 1_000_000)
@@ -83,7 +109,10 @@ class BettingRound:
             # Track this player as having acted this round
             self.players_acted_this_round.add(seat)
 
-            # Apply the action to the state
+            # Apply the action to the state. Reopen checks use the minimum
+            # that was in force before a short all-in can rewrite it.
+            prior_max = self.max_commitment
+            prior_min = max(self.state.config.big_blind, self.state.last_raise_size)
             self.state = self._apply_action(self.state, seat, action)
             self.state = rebuild_pots(self.state)
             chips_added = (
@@ -99,13 +128,13 @@ class BettingRound:
             )
 
             # Check if this action re-opens betting (half-raise rule)
-            if self._reopens_betting(action):
+            reopens = self._reopens_betting(action, prior_max, prior_min)
+            if reopens:
                 # This is a full raise. Reset acted set so all others must act again.
                 self.players_acted_this_round = {seat}  # Only raiser has acted
 
-            log_line = format_action_log_line(
-                self.state, seat, action, self.action_count_this_street, chips_added
-            )
+            num_players = len(self.state.players)
+            name = self.names.get(seat, self.state.players[seat].name)
             self.logger.log_event(
                 ActionTaken(
                     hand_number=self.state.hand_number,
@@ -116,279 +145,55 @@ class BettingRound:
                     chips_added=chips_added,
                     pot_after=pot_after,
                     action_num=self.action_count_this_street,
-                    log_line=log_line,
+                    label=_action_label(action, had_bet),
+                    to_call_before=to_call_before,
+                    stack_before=stack_before,
+                    stack_after=self.state.players[seat].stack,
+                    all_in=self.state.players[seat].is_all_in,
+                    reopens=reopens,
+                    name=name,
+                    position=position_label(seat, self.state.dealer_seat, num_players),
                 )
             )
+            if action.type == ActionType.FOLD:
+                self.logger.log_event(
+                    PlayerOut(
+                        hand_number=self.state.hand_number,
+                        seat=seat,
+                        reason="fold",
+                        street=self.state.street.value,
+                        stack=self.state.players[seat].stack,
+                        name=name,
+                        position=position_label(seat, self.state.dealer_seat, num_players),
+                    )
+                )
 
-        # Round is closed - clear action_on_seat and committed_this_street
-        final_state = replace(self.state, action_on_seat=None)
-        # Keep committed_this_street as-is (will be used for pot calculation and reset on next street)
-        return final_state
+        # Return chips no opponent matched before the pot is built.
+        self.state = return_uncalled_bet(self.state)
+        self.state = rebuild_pots(self.state)
+        return replace(self.state, action_on_seat=None)
 
     def _round_is_closed(self) -> bool:
-        """Check if the betting round is closed.
-
-        A round is closed when all players who can act (non-folded, non-all-in)
-        have acted and matched the highest bet. All-in players are excluded from
-        this check since they cannot act further.
-
-        Returns:
-            True if round is closed, False otherwise.
-        """
-        # Only count players who can still act (not folded, not all-in, not eliminated)
-        can_act_seats = [
-            i for i, p in enumerate(self.state.players)
-            if not p.has_folded and not p.is_eliminated and not p.is_all_in
-        ]
-
-        # If 1 or fewer players can act, round is closed
-        if len(can_act_seats) <= 1:
-            return True
-
-        # All players who can act must have acted at least once
-        for seat in can_act_seats:
-            if seat not in self.players_acted_this_round:
-                return False
-
-        # All players who can act must have matched the highest bet
-        for seat in can_act_seats:
-            player = self.state.players[seat]
-            if player.committed_this_street < self.max_commitment:
-                return False
-
-        return True
+        """Check if the betting round is closed."""
+        return round_is_closed(self.state, self.players_acted_this_round, self.max_commitment)
 
     def _apply_action(self, state: GameState, seat: int, action: Action) -> GameState:
-        """Apply an action to the state and return the updated state.
-
-        Action amounts represent the TOTAL chips committed by the player,
-        not the additional amount.
-
-        Args:
-            state: Current GameState.
-            seat: Seat number of the player taking the action.
-            action: The action to apply.
-
-        Returns:
-            Updated GameState after the action.
-        """
-        player = state.players[seat]
-        players_list = list(state.players)
-
-        if action.type == ActionType.FOLD:
-            # Fold: player is marked as folded
-            players_list[seat] = player.with_folded(True)
-
-        elif action.type == ActionType.CHECK:
-            # Check: no change to player state
-            pass
-
-        elif action.type == ActionType.CALL:
-            # Call: action.amount is the total to call
-            # Calculate additional amount beyond what's already committed
-            additional_to_commit = action.amount - player.committed_this_street
-            new_stack = player.stack - additional_to_commit
-            new_committed_street = action.amount
-            new_committed_hand = player.committed_this_hand + additional_to_commit
-
-            updated_player = (
-                player.with_stack(new_stack)
-                .with_committed_this_street(new_committed_street)
-                .with_committed_this_hand(new_committed_hand)
-            )
-
-            # Mark as all-in if stack is depleted OR if call amount < bet to call (incomplete call)
-            if new_stack == 0 or action.amount < state.current_bet_to_call:
-                updated_player = updated_player.with_all_in(True)
-
-            players_list[seat] = updated_player
-
-        elif action.type == ActionType.RAISE:
-            # Raise: action.amount is the total raise to
-            amount_to_raise = action.amount - state.current_bet_to_call
-            additional_to_commit = action.amount - player.committed_this_street
-
-            new_stack = player.stack - additional_to_commit
-            new_committed_street = action.amount
-            new_committed_hand = player.committed_this_hand + additional_to_commit
-
-            updated_player = (
-                player.with_stack(new_stack)
-                .with_committed_this_street(new_committed_street)
-                .with_committed_this_hand(new_committed_hand)
-            )
-
-            if new_stack == 0:
-                updated_player = updated_player.with_all_in(True)
-
-            players_list[seat] = updated_player
-
-            # Update game state: new bet to call and last raise size
-            state = replace(
-                state,
-                current_bet_to_call=action.amount,
-                last_raise_size=amount_to_raise,
-                players=tuple(players_list),
-            )
-
-        elif action.type == ActionType.ALL_IN:
-            # All-in: action.amount is the total all-in to
-            additional_to_commit = action.amount - player.committed_this_street
-            new_stack = player.stack - additional_to_commit
-            new_committed_street = action.amount
-            new_committed_hand = player.committed_this_hand + additional_to_commit
-
-            updated_player = (
-                player.with_stack(new_stack)
-                .with_committed_this_street(new_committed_street)
-                .with_committed_this_hand(new_committed_hand)
-                .with_all_in(True)
-            )
-
-            players_list[seat] = updated_player
-
-            # If all-in amount > current bet, it's a raise
-            if action.amount > state.current_bet_to_call:
-                amount_to_raise = action.amount - state.current_bet_to_call
-                state = replace(
-                    state,
-                    current_bet_to_call=action.amount,
-                    last_raise_size=amount_to_raise,
-                    players=tuple(players_list),
-                )
-                players_list = list(state.players)
-
-        # Update game state with new players
-        state = replace(state, players=tuple(players_list))
-
-        # Advance to next player
-        state = self._advance_action_on_seat(state, seat)
-
-        # Update action history
-        state = replace(
-            state,
-            action_history_this_street=[*state.action_history_this_street, (seat, action)],
-            action_history_this_hand=[*state.action_history_this_hand, (seat, action)],
-        )
-
-        return state
+        """Apply an action and move action to the next player who can bet."""
+        state = apply_action(state, seat, action)
+        return advance_action(state, seat)
 
     def _advance_action_on_seat(self, state: GameState, current_seat: int) -> GameState:
-        """Advance to the next player who needs to act.
-
-        Args:
-            state: Current GameState.
-            current_seat: The seat that just acted.
-
-        Returns:
-            Updated GameState with action_on_seat pointing to next actor.
-        """
-        num_players = len(state.players)
-        next_seat = (current_seat + 1) % num_players
-
-        # Count how many players can act (not folded, not eliminated, not all-in)
-        can_act_count = 0
-        for i in range(num_players):
-            player = state.players[i]
-            if not player.has_folded and not player.is_eliminated and not player.is_all_in:
-                can_act_count += 1
-
-        # If only 1 or fewer players can act, betting round should close
-        # Return None to signal no more actions needed
-        if can_act_count <= 1:
-            return replace(state, action_on_seat=None)
-
-        # Skip players until we find one who can act
-        attempts = 0
-        while attempts < num_players:
-            player = state.players[next_seat]
-
-            # Skip folded and eliminated players
-            if player.has_folded or player.is_eliminated:
-                next_seat = (next_seat + 1) % num_players
-                attempts += 1
-                continue
-
-            # Skip all-in players (they've posted all they can)
-            if player.is_all_in:
-                next_seat = (next_seat + 1) % num_players
-                attempts += 1
-                continue
-
-            # This player can act
-            return replace(state, action_on_seat=next_seat)
-
-        # No more players can act
-        return replace(state, action_on_seat=None)
+        """Advance to the next player who needs to act."""
+        return advance_action(state, current_seat)
 
     def _set_initial_action_on_seat(self, state: GameState) -> GameState:
-        """Set action to first non-folded, non-eliminated, non-all-in player from action_on_seat.
-
-        This is used when moving to a new street where all folded players should be
-        permanently excluded from acting.
-
-        Args:
-            state: Current GameState.
-
-        Returns:
-            Updated GameState with action_on_seat properly set.
-        """
-        if state.action_on_seat is None:
-            return state
-
-        num_players = len(state.players)
-        current_seat = state.action_on_seat
-
-        # Find the first player who can act starting from the current seat
-        for _ in range(num_players):
-            player = state.players[current_seat]
-
-            if not player.has_folded and not player.is_eliminated and not player.is_all_in:
-                return replace(state, action_on_seat=current_seat)
-
-            current_seat = (current_seat + 1) % num_players
-
-        # No one can act
-        return replace(state, action_on_seat=None)
+        """Set action to the first player from the current seat who can still bet."""
+        return focus_action(state)
 
     def _count_active_players(self, state: GameState) -> int:
-        """Count the number of active (non-folded, non-eliminated) players.
+        """Count active (non-folded, non-eliminated) players."""
+        return count_active_players(state)
 
-        Args:
-            state: Current GameState.
-
-        Returns:
-            The count of active players.
-        """
-        return sum(
-            1
-            for p in state.players
-            if not p.has_folded and not p.is_eliminated
-        )
-
-    def _reopens_betting(self, action: Action) -> bool:
-        """Check if an action re-opens betting for other players (half-raise rule).
-
-        A RAISE always re-opens. An ALL_IN re-opens only if it qualifies as
-        a "full raise" (raise_amount >= min_raise_increment). Shorter all-ins
-        are treated as "short all-ins" and do NOT re-open (half-raise rule).
-
-        Returns:
-            True if the action re-opens betting, False otherwise.
-        """
-        if action.type == ActionType.RAISE:
-            # A RAISE always re-opens betting
-            return True
-
-        if action.type == ActionType.ALL_IN:
-            # All-in re-opens only if it's a "full raise"
-            # Calculate the raise amount (how much beyond the bet to call)
-            raise_amount = action.amount - self.max_commitment
-            min_raise_increment = max(
-                self.state.config.big_blind, self.state.last_raise_size
-            )
-            # Re-opens if raise_amount >= min_raise_increment
-            return raise_amount >= min_raise_increment
-
-        # CHECK, CALL, FOLD do not re-open
-        return False
+    def _reopens_betting(self, action: Action, prior_max: int, prior_min: int) -> bool:
+        """Check the half-raise rule against the minimum in force before the action."""
+        return reopens_betting(action, prior_max, prior_min)
