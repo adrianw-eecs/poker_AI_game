@@ -6,6 +6,7 @@ Concise documentation for the current state of the project.
 |------|---------|
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Current models, what works, how to run it, known limitations |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Project layout, refactor and optimisation proposals |
+| [`PERFORMANCE.md`](PERFORMANCE.md) | Measured engine↔model costs and the ranked optimisation plan |
 | [`ENGINE.md`](ENGINE.md) | Engine internals: data structures, betting, showdown, testing |
 | [`ML.md`](ML.md) | Environment, observation encoders, action space, models |
 | [`NFSP_IMPROVEMENTS.md`](NFSP_IMPROVEMENTS.md) | Observation gaps and training improvements for NFSP |

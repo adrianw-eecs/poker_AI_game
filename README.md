@@ -52,6 +52,7 @@ pytest            # 235 tests, ~10 s
 |---|---|
 | [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) | Current state, how to run, known limitations |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Project layout, refactor and optimisation proposals |
+| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured performance profile and optimisation plan |
 | [`docs/ENGINE.md`](docs/ENGINE.md) | Engine internals: data structures, betting, showdown, testing |
 | [`docs/ML.md`](docs/ML.md) | Environment, observation encoders, action space, models |
 | [`docs/NFSP_IMPROVEMENTS.md`](docs/NFSP_IMPROVEMENTS.md) | Observation gaps and training-speed proposals for NFSP |

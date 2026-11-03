@@ -34,58 +34,51 @@ the same betting rules and cannot drift apart.
 
 ### 2.1 `legal_actions` is rebuilt several times per decision
 
-Verified call sites in the decision path:
+### 2.1 `legal_actions`: measured, not the problem
+
+An earlier draft of this document claimed `legal_actions()` is rebuilt "up to four
+times per decision" and proposed caching it. **Measurement contradicted that.**
+Instrumenting the call counters gives:
 
 ```
-ml/env.py:493            legal_actions(self.state, seat)     # mask build
-ml/action_space.py:223   legal_actions(state, seat)          # _mask_pot_fraction
-ml/action_space.py:340   legal_actions(state, seat)          # action_index_to_action
-ml/action_space.py:424   legal_actions(state, seat)          # action_to_action_index
+get_action_mask(): 1 legal_actions call
+step():            1 legal_actions call
 ```
 
-`get_action_mask()` → `build_action_mask()` → `_mask_pot_fraction()` →
-`legal_actions()`, and then `step_multi()` → `action_index_to_action()` →
-`legal_actions()` again. For each bucket under `POT_FRACTION` there is an
-additional `pot_fraction_raise_to()` → `capped_raise_bounds()` →
-`min_raise_to()` chain plus a `validate()` call.
+So it is two calls per decision cycle, and each costs **2.7 µs** — about 0.05% of
+a decision. The four call *sites* exist, but only two fire per decision.
 
-**Proposal.** Compute the legal action set **once** per decision and pass it
-down. Either memoise on `GameState` (it is a frozen dataclass, so `id(state)` is
-a safe key) or thread a `LegalActions` object through the mask → action-index
-conversion. This is pure allocation removal on the hottest path in training and
-should be the first optimisation attempted.
+The proposal is withdrawn. See [`PERFORMANCE.md`](PERFORMANCE.md) for where the
+time actually goes.
 
 ### 2.2 Frozen dataclass `replace()` churn
 
 `GameState` is frozen, and `rules.apply_action` rebuilds the player tuple plus
 both history lists on every action. `rebuild_pots` then reconstructs the whole
-pot list from scratch. In a training loop that runs millions of hands this
-dominates allocation cost.
+pot list from scratch.
 
-**Proposal.** Keep immutability at the API boundary but make `committed_this_hand`
-accounting incremental. `build_pots` currently iterates every unique commitment
-level for every call; it could be cached on the state and invalidated only when a
-commitment changes. Do not remove immutability — the determinism and replay
-guarantees depend on it.
+**Measured:** `apply_action` is 5.7 µs and `rebuild_pots` is 11.1 µs, so together
+~0.3% of a production decision. The churn is real but **not worth optimising at
+current scale** — it is ~200× cheaper than one forward pass.
+
+**Proposal.** Defer. Keep immutability; the determinism and replay guarantees
+depend on it. Revisit only if the engine ever becomes the bottleneck, which
+requires batched inference first (see [`PERFORMANCE.md`](PERFORMANCE.md) §3).
 
 ### 2.3 `pot_manager.build_pots` allocation
 
-`build_pots` allocates a `frozenset` per level per call. With 9 players and
-several side pots this is repeated on every `rebuild_pots`, which is called after
-*every* action (`betting_round.py`) and again at end of round.
-
-**Proposal.** Same cache as 2.2, or pre-size the structures. Low risk, measurable
-gain.
+`build_pots` allocates a `frozenset` per level per call, repeated on every
+`rebuild_pots`. Measured at ~11 µs per call — see 2.2. Defer for the same reason.
 
 ### 2.4 Missing short-all-in raise suppression
 
 Documented in `ENGINE.md` §Known Rule Deviation. `reopens_betting()` computes the
 correct answer but `legal_actions()` does not consume it.
 
-**Proposal.** Thread a `betting_reopened: bool` into `legal_actions()` and drop
-`Action.raise_to(...)` when the last aggressive action was a short all-in. This is
-a correctness fix, not an optimisation, and it changes the strategy space the
-models learn — retrain after applying it.
+This remains the highest-value **correctness** item in the engine. Thread a
+`betting_reopened: bool` into `legal_actions()` and drop `Action.raise_to(...)`
+when the last aggressive action was a short all-in. It changes the strategy space
+the models learn, so retrain after applying it.
 
 ### 2.5 Showdown evaluator
 
@@ -196,17 +189,24 @@ regressions deterministically rather than by sampling.
 
 ## 6. Priority order
 
-Ranked by value ÷ risk:
+Ranked by measured value ÷ risk. Performance items are justified and quantified
+in [`PERFORMANCE.md`](PERFORMANCE.md); this table is the short version.
 
 | # | Change | Effort | Risk | Payoff |
 |---|---|---|---|---|
-| 1 | Single `legal_actions` per decision | S | Low | Hot-path allocation |
-| 2 | Consolidate metrics into `metrics.py` | S | Low | Correctness |
-| 3 | Property test for chip conservation | S | Low | Regression safety |
-| 4 | Fast 7-card evaluator | M | Low | Showdown throughput |
-| 5 | Short-all-in raise suppression | M | Medium | Rule correctness |
-| 6 | Retire obs v1 for training | L | Medium | Removes branching |
-| 7 | Batched multi-hand inference | L | High | Order-of-magnitude throughput |
+| 1 | ~~Scalar `np.clip` in observation helpers~~ **DONE** | XS | None | 233 → 99 µs/obs; +47% end-to-end throughput |
+| 2 | Batched multi-hand inference | L | High | ~36× on the 67% dominant cost |
+| 3 | Warm-up gate on hands, not decisions | S | Low | Correctness of early training |
+| 4 | Consolidate metrics into `metrics.py` | S | Low | Correctness |
+| 5 | Property test for chip conservation | S | Low | Regression safety |
+| 6 | Short-all-in raise suppression | M | Medium | Rule correctness |
+| 7 | Shared trunk experiment (with control) | M | Medium | Amortised representation |
+| 8 | Retire obs v1 for training | L | Medium | Removes branching |
 
-Do 1–3 immediately; they are cheap and safe. Items 6–7 are the real wins but
-should follow the hybrid work, not precede it.
+Item 1 was applied and verified (0 mismatches over 528 NaN-aware boundary cases,
+235 tests passing). Do 3–5 next — they are cheap. Item 2 is the real project and
+dwarfs everything else; items 6–8 should follow it.
+
+Two earlier proposals were **withdrawn after measurement**: `legal_actions`
+caching (§2.1) and pot/state allocation work (§2.2) are both under 0.3% of a
+decision. The frozen-dataclass cost is ~200× smaller than one forward pass.
