@@ -187,6 +187,7 @@ class NFSPModel:
 
         self._step = 0
         self._q_updates = 0
+        self._p_updates = 0
         # None until begin_episode(). Held for the whole hand.
         self._episode_br: bool | None = None
         self._episode_br_by_seat: dict[int, bool] = {}
@@ -460,6 +461,7 @@ class NFSPModel:
         policy_loss.backward()
         nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=_GRAD_CLIP)
         self.policy_optimizer.step()
+        self._p_updates += 1
         return float(policy_loss.item())
 
     def trim_q_buffer(self, keep_fraction: float = 0.75) -> int:

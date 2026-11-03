@@ -37,7 +37,6 @@ from poker.ml.models.nfsp_model import NFSPModel
 from poker.ml.population import PopulationManager
 from poker.ml.models.sdcfr_model import SDCFRModel
 from poker.ml.observation_v2 import OBS_V2_DIM
-from poker.ml.env import REWARD_SCALE
 
 # Evaluation constants
 _EVAL_SEED = 17_001
@@ -313,7 +312,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=2048,
                         help="Batch size (default: 2048)")
     parser.add_argument("--train-every", type=int, default=64,
-                        help="Train every N episodes (default: 64)")
+                        help="Run a gradient update every N decisions (counts train_step calls, "
+                             "not episodes; see docs/PERFORMANCE.md)")
     parser.add_argument("--eta", type=float, default=0.1,
                         help="Best-response mix fraction (0.0-1.0)")
     parser.add_argument("--updates-per-train", type=int, default=1,
@@ -354,7 +354,13 @@ def main() -> None:
     if args.policy_batch_threshold is not None:
         print(f"[INFO] Setting policy batch threshold to {args.policy_batch_threshold}")
 
+    # v2 training requires the 318-wide hero-relative encoder throughout: the
+    # env is built with obs_version=2 below, and _begin / evaluate also use v2.
+    # Omitting these made the model default to v1 (98-wide), which then failed
+    # in _prepare_obs with "Cannot adapt observation of length 318 to 98".
     model = NFSPModel(
+        obs_version=2,
+        bet_scheme=BetScheme.POT_FRACTION,
         eta=args.eta,
         updates_per_train=args.updates_per_train,
         batch_size=args.batch_size,
@@ -373,13 +379,15 @@ def main() -> None:
         print(f"[LOAD] eta={model.eta}, updates_per_train={model.updates_per_train}")
         print(f"[OVERRIDE] Command line: eta={args.eta}, updates_per_train={args.updates_per_train}")
         
-        # Validate that checkpoint obs_version matches v2 training
+        # A v1 checkpoint cannot run under the v2 env, so refuse rather than
+        # continuing into an observation-width crash mid-episode.
         checkpoint_obs_version = int(model.obs_version)
         if checkpoint_obs_version != 2:
-            print(f"[WARNING] Checkpoint obs_version={checkpoint_obs_version} but training expects obs v2 (318-dim)")
-            print("[WARNING] This may cause training to fail. Consider using a v2 checkpoint like:")
-            print("[WARNING]   models/nfsp_v2/nfsp_v2.pt")
-            print(f"[INFO] Continuing anyway with override: obs_version={model.obs_version}")
+            raise SystemExit(
+                f"Refusing {args.checkpoint}: checkpoint obs_version={checkpoint_obs_version}, "
+                "but v2 training requires obs v2 (318-dim). "
+                "Use a v2 checkpoint such as models/nfsp_v2/nfsp_v2.pt."
+            )
         
         model.eta = args.eta
         model.updates_per_train = args.updates_per_train
@@ -415,6 +423,8 @@ def main() -> None:
 
     start = time.time()
     episode = 0
+    last_q_loss: float | None = None
+    last_p_loss: float | None = None
 
     for episode in range(args.episodes):
         ep_start = time.time()
@@ -444,10 +454,16 @@ def main() -> None:
 
         obs, _ = env.reset()
 
+        # Anticipatory dynamics: sample one mode (best response vs average
+        # policy) per episode. Without this the mode is drawn lazily on the very
+        # first decision and then held for the entire run, so the reservoir only
+        # ever fills if that single draw happened to land on best response.
+        model.begin_episode(learning_seat)
+
         while True:
             mask = env.get_action_mask()
             current_obs = np.asarray(obs)
-            action = model.select_action(current_obs, mask, training=True)
+            action = model.select_action(current_obs, mask, training=True, seat=learning_seat)
             obs, reward, done, _, _ = env.step(action)
 
             if env.state is not None and env.state.action_on_seat == learning_seat:
@@ -464,32 +480,44 @@ def main() -> None:
             if env.state.action_on_seat != learning_seat:
                 break
 
-        # Training step: actually perform gradient updates on stored transitions
+        # Training step: one decision = one step. train_step() decides internally
+        # whether this step falls on a train_every boundary.
         train_result = model.train_step()
-        
-        # Track updates for logging
+
+        # Track the most recent real loss OUTSIDE the logging branch. train_step
+        # returns None on every non-boundary step, so the episode%100 log line
+        # almost never coincides with a boundary and would print "None" forever.
+        if train_result["q_loss"] is not None:
+            last_q_loss = train_result["q_loss"]
+        if train_result["policy_loss"] is not None:
+            last_p_loss = train_result["policy_loss"]
+
+        # Periodic logging. This MUST NOT call train_step() again: doing so
+        # injected an extra gradient update per log line (~1% of steps), which
+        # meant logged losses came from a different step than the training loop.
         if episode % 100 == 0:
-            prev_updates = model._q_updates
-            train_result = model.train_step()
-            training_happened = (model._q_updates > prev_updates)
-            
-            q_loss_val = train_result['q_loss']
-            p_loss_val = train_result['policy_loss']
-            
-            if training_happened:
-                q_loss_str = q_loss_val if q_loss_val is not None else "None"
-                p_loss_str = p_loss_val if p_loss_val is not None else "None"
-                q_train = " [Q-TRAIN]"
-                p_train = " [P-TRAIN]"
-            else:
-                q_loss_str = "(train_happened)"
-                p_loss_str = "(train_happened)"
-                q_train = ""
-                p_train = ""
-            
-            print(f"[{datetime.now()}]   [TRAIN] Ep {episode:5d}: Q_buf={len(model.q_buffer):6d}, "
-                  f"P_buf={len(model.policy_buffer):6d}, updates={model._q_updates:6d}, "
-                  f"{q_train}Q_loss={q_loss_str:8s}, {p_train}P_loss={p_loss_str:8s}")
+            q_loss_val = train_result["q_loss"]
+            p_loss_val = train_result["policy_loss"]
+
+            # "*" marks a loss measured on this exact step; a bare number is the
+            # most recent earlier value.
+            q_str = (
+                f"{q_loss_val:8.4f}*" if q_loss_val is not None
+                else f"{last_q_loss:8.4f} " if last_q_loss is not None
+                else "    None "
+            )
+            p_str = (
+                f"{p_loss_val:8.4f}*" if p_loss_val is not None
+                else f"{last_p_loss:8.4f} " if last_p_loss is not None
+                else "    None "
+            )
+
+            print(
+                f"[{datetime.now()}]   [TRAIN] Ep {episode:5d}: "
+                f"Q_buf={len(model.q_buffer):6d}, P_buf={len(model.policy_buffer):6d}, "
+                f"Q_upd={model._q_updates:6d}, P_upd={model._p_updates:6d}, "
+                f"Q_loss={q_str}, P_loss={p_str}"
+            )
 
         # Evaluation
         if episode % args.eval_every == 0 and not args.no_validation:
