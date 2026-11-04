@@ -22,14 +22,14 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from poker.bots.call_bot import CallBot
 from poker.bots.flop_bot import FlopBot
 from poker.bots.random_bot import RandomBot
-from poker.ml.action_space import BetScheme, build_action_mask
-from poker.ml.cfr.traversal import ExternalSamplingTraverser
+from poker.ml.action_space import BetScheme
 from poker.ml.env import PokerEnv
 from poker.ml.metrics import bb100_interval
 from poker.ml.models.nfsp_model import NFSPModel
@@ -54,103 +54,68 @@ def _load_teacher(path: Path) -> SDCFRModel | None:
     return teacher
 
 
-def collect_regret_targets(
+def distill_from_teacher(
     model: NFSPModel,
     teacher: SDCFRModel,
-    traversals: int,
-    num_players: int,
-    seed: int,
-) -> tuple[int, int]:
-    """Run SD-CFR traversals and feed their targets into the distillation memory.
+    states: list[tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]],
+    batch: int | None = None,
+    rng: np.random.RandomState | None = None,
+) -> int:
+    """Store SD-CFR's strategy on states the learner actually reaches.
 
-    Opponents are the current NFSP average policy, which is what makes this a
-    self-play distillation rather than a distillation of random play.
+    The teacher is queried through its *network*, not through individual
+    traversal buffer rows. A traversal row carries one nonzero advantage out of
+    seven (outcome sampling), and regret-matching that collapses to a one-hot or
+    uniform target that frequently disagrees with what SD-CFR actually plays.
+    The network output is the teacher's averaged, low-variance strategy.
 
-    Returns (rows added, traversals that reached a decision).
+    The legal mask comes from the env that produced the state, so no mask is
+    inferred. States are the learner's own, which keeps the distillation target
+    on the distribution the policy will be evaluated on.
+
+    Args:
+        states: ``(obs, legal_mask)`` pairs collected during learner play.
+        batch: How many states to query; ``None`` uses all of them.
+
+    Returns:
+        Number of (obs, advantages, mask) rows added to the distillation memory.
     """
-    from poker.config.blind_schedule import BlindLevel, BlindSchedule
-    from poker.config.game_config import GameConfig
-
-    config = GameConfig(
-        num_players=num_players,
-        starting_stack=1000,
-        small_blind=25,
-        big_blind=50,
-        ante=0,
-        rake_percent=0.0,
-        rake_cap=None,
-        blind_schedule=BlindSchedule(
-            levels=[BlindLevel(25, 50, 0)], hands_per_level=10**9, fixed=True
-        ),
-        run_it_twice=False,
-    )
-    traverser = ExternalSamplingTraverser(
-        config=config,
-        advantage_network=teacher.advantage_network,
-        device=teacher.device,
-        regret_buffer=teacher.regret_buffer,
-        obs_version=2,
-        bet_scheme=BetScheme.POT_FRACTION,
-    )
-
-    before = len(teacher.regret_buffer)
-    used = 0
-    rng = np.random.RandomState(seed)
-    for i in range(traversals):
-        seat = int(rng.randint(0, num_players))
-        bots = [
-            RandomBot(seed=int(rng.randint(0, 2**31 - 1)))
-            if (i + k) % 2 == 0
-            else FlopBot()
-            for k in range(num_players - 1)
-        ]
-        traverser.traverse(
-            traverser_seat=seat,
-            cfr_iteration=max(1, teacher.cfr_iteration),
-            opponent_bots=bots,
-            num_players=num_players,
-        )
-        used += 1
-
-    added = len(teacher.regret_buffer) - before
-    # Move the freshly collected rows into the learner's distillation memory.
-    rows = _drain_new_targets(teacher, added, model)
-    return rows, used
-
-
-def _drain_new_targets(teacher: SDCFRModel, count: int, model: NFSPModel) -> int:
-    """Copy the newest buffer rows into the learner as (obs, adv, mask) triples.
-
-    The traverser stores [obs | advantages] and does not persist the legal mask,
-    so legality is recovered from the advantages' support: an advantage row is
-    zero off-support by construction in outcome sampling.
-    """
-    if count <= 0 or len(teacher.regret_buffer) == 0:
+    if not states:
         return 0
-    buf = teacher.regret_buffer
-    obs_dim = teacher.obs_dim
-    taken = min(count, len(buf))
-    batch = buf.sample(taken)
-    packed = batch["obs"]
+    subset = states
+    if batch is not None and batch < len(states):
+        pick = (rng or np.random).choice(len(states), batch, replace=False)
+        subset = [states[i] for i in pick]
+
+    obs_batch = np.stack([obs for obs, _ in subset]).astype(np.float32)
+    mask_batch = np.stack([mk for _, mk in subset]).astype(np.float32)
+
+    teacher.advantage_network.eval()
+    with torch.no_grad():
+        obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=teacher.device)
+        advantages = teacher.advantage_network(obs_t).cpu().numpy().astype(np.float32)
+
     added = 0
-    for row in packed:
-        obs = row[:obs_dim].astype(np.float32)
-        adv = row[obs_dim: obs_dim + 7].astype(np.float32)
-        # Recover a usable mask: treat "fold/call" as always legal and any
-        # action carrying an advantage as legal, so regret matching has support.
-        mask = np.zeros(7, dtype=np.float32)
-        mask[0] = 1.0
-        mask[1] = 1.0
-        mask[np.abs(adv) > 0] = 1.0
+    for i in range(obs_batch.shape[0]):
+        mask = mask_batch[i]
         if mask.sum() < 2:
             continue
-        model.add_regret_sample(obs, adv, mask, weight=1.0)
+        # Store the raw advantages and the true mask; regret matching is applied
+        # at sample time inside NFSPModel._distillation_step.
+        model.add_regret_sample(obs_batch[i], advantages[i], mask, weight=1.0)
         added += 1
     return added
 
 
-def play_episode(model: NFSPModel, num_players: int, seed: int) -> tuple[int, float]:
-    """One single-seat hand, mirroring train_nfsp_v2's loop."""
+def play_episode(
+    model: NFSPModel, num_players: int, seed: int
+) -> tuple[int, float, list[tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]]]:
+    """One single-seat hand, mirroring train_nfsp_v2's loop.
+
+    Returns ``(decisions, reward, visited)`` where ``visited`` holds the
+    ``(obs, legal_mask)`` pair for each learner decision, so distillation can be
+    queried on states the learner actually reaches.
+    """
     learning_seat = int(np.random.randint(0, num_players))
     opponents = [
         RandomBot(seed=seed + i) if i % 2 == 0 else FlopBot()
@@ -171,9 +136,13 @@ def play_episode(model: NFSPModel, num_players: int, seed: int) -> tuple[int, fl
 
     decisions = 0
     reward = 0.0
+    # Teacher queries are made on the learner's own decision states, so the
+    # distillation target stays on the policy's operating distribution.
+    visited: list[tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]] = []
     while True:
         mask = env.get_action_mask()
         current = np.asarray(obs)
+        visited.append((current.copy(), np.asarray(mask, dtype=np.float32).copy()))
         action = model.select_action(current, mask, training=True, seat=learning_seat)
         obs, reward, done, _, _ = env.step(action)
         if env.state is not None and env.state.action_on_seat == learning_seat:
@@ -193,7 +162,9 @@ def play_episode(model: NFSPModel, num_players: int, seed: int) -> tuple[int, fl
             break
         if decisions >= _MAX_STEPS:
             break
-    return decisions, float(reward)
+    # One hand finished. The Q warm-up gate counts hands, not decisions.
+    model.end_hand()
+    return decisions, float(reward), visited
 
 
 def evaluate(model: NFSPModel, hands: int, seed: int) -> tuple[float, float, float, int]:
@@ -243,7 +214,14 @@ def main() -> None:
     p.add_argument("--shared-trunk", action="store_true",
                    help="Share one trunk between Q and policy heads")
     p.add_argument("--traversals-per-episode", type=int, default=2,
-                   help="SD-CFR traversals run per training episode")
+                   help="(unused) kept for compatibility; distillation now queries "
+                        "the teacher on the learner's own visited states")
+    p.add_argument("--distill-every", type=int, default=25,
+                   help="Distil the teacher's strategy every N episodes (default: 25)")
+    p.add_argument("--stop-min-episode", type=int, default=40_000,
+                   help="Earliest episode at which stall detection may stop training")
+    p.add_argument("--stop-patience", type=int, default=10,
+                   help="Evaluations without a better lower bound before stopping")
     p.add_argument("--players", type=int, default=6)
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--train-every", type=int, default=64)
@@ -309,14 +287,18 @@ def main() -> None:
     last_q: float | None = None
     last_p: float | None = None
     best_bb100 = -1e18
+    stalls = 0
+    stop_reason = "episode cap reached"
 
     for episode in range(args.episodes):
-        decisions, _reward = play_episode(model, args.players, seed=episode)
+        decisions, _reward, visited = play_episode(model, args.players, seed=episode)
 
-        if args.kappa > 0.0 and episode % 25 == 0:
-            rows, _used = collect_regret_targets(
-                model, teacher, args.traversals_per_episode, args.players, seed=episode
-            )
+        # Distil the teacher's strategy on the states just visited. Queried in
+        # one batch per episode rather than per decision: one forward pass over
+        # the teacher is far cheaper than one call per state, and the target is
+        # the teacher's averaged policy rather than a single sampled row.
+        if args.kappa > 0.0 and visited and episode % args.distill_every == 0:
+            rows = distill_from_teacher(model, teacher, visited)
             actions["targets"] += rows
 
         result = model.train_step()
@@ -339,27 +321,43 @@ def main() -> None:
         if (not args.no_validation) and episode and episode % args.eval_every == 0:
             mean, lower, upper, n = evaluate(model, args.eval_hands, _EVAL_SEED)
             print(f"  [EVAL] {mean:+.1f} BB/100 (95% [{lower:+.1f}, {upper:+.1f}]) n={n}")
-            if mean > best_bb100:
-                best_bb100 = mean
+            # Select on the interval's lower bound, not the mean: at these
+            # sample sizes the mean is noisy and picking on it rewards luck.
+            if lower > best_bb100:
+                best_bb100 = lower
+                stalls = 0
                 model.save(str(models_dir / "hybrid_best.pt"),
-                           training_meta={"episode": episode, "bb100": mean,
-                                          "kappa": args.kappa})
-                print(f"  [BEST] {mean:+.1f} BB/100 -> {models_dir / 'hybrid_best.pt'}")
+                           training_meta={"episode": episode, "bb100_lower": lower,
+                                          "bb100_mean": mean, "kappa": args.kappa})
+                print(f"  [BEST] lower bound {lower:+.1f} BB/100 -> {models_dir / 'hybrid_best.pt'}")
+            else:
+                stalls += 1
+                print(f"  [STALL] no improvement for {stalls} eval(s)")
+                if episode >= args.stop_min_episode and stalls >= args.stop_patience:
+                    stop_reason = (
+                        f"stall detection after {stalls} evals "
+                        f"(patience {args.stop_patience})"
+                    )
+                    print(f"  [STOP] {stop_reason}")
+                    break
 
         if episode and episode % args.checkpoint_every == 0:
             path = models_dir / f"hybrid_gen_{episode}.pt"
             model.save(str(path), training_meta={"episode": episode, "kappa": args.kappa})
             print(f"  [GEN] {path}")
 
+    import shutil
+
     final = models_dir / "hybrid.pt"
     if (models_dir / "hybrid_best.pt").is_file():
-        import shutil
         shutil.copy(models_dir / "hybrid_best.pt", final)
     else:
         model.save(str(final), training_meta={"kappa": args.kappa})
     elapsed = time.time() - start
     print(f"\n[DONE] {elapsed:.0f}s | kappa={args.kappa} | {final}")
+    print(f"       stopped: {stop_reason}")
     print(f"       distillation rows added: {actions['targets']}")
+    print(f"       Q updates={model._q_updates}  P updates={model._p_updates}")
 
 
 if __name__ == "__main__":

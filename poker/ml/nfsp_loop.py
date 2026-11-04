@@ -60,6 +60,8 @@ def consume_hand(
         model.train_step()
         steps += 1
         if done:
+            # One hand finished. The Q warm-up gate counts hands, not decisions.
+            model.end_hand()
             terminal = np.zeros(int(model.q_network.input_dim), dtype=np.float32)
             ones = np.ones(model.num_actions, dtype=np.float32)
             for seat, prev_obs, prev_action, prev_mask in pending:

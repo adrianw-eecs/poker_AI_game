@@ -503,6 +503,9 @@ def main() -> None:
         # whether this step falls on a train_every boundary.
         train_result = model.train_step()
 
+        # One hand finished. The Q warm-up gate counts hands, not decisions.
+        model.end_hand()
+
         # Track the most recent real loss OUTSIDE the logging branch. train_step
         # returns None on every non-boundary step, so the episode%100 log line
         # almost never coincides with a boundary and would print "None" forever.

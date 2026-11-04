@@ -128,6 +128,7 @@ class NFSPModel:
         shared_trunk: bool = False,
         distill_kappa: float = 0.0,
         distill_capacity: int = 200_000,
+        q_warmup_hands: int = 200,
     ) -> None:
         if obs_version not in (1, 2):
             raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
@@ -220,10 +221,23 @@ class NFSPModel:
         # None until begin_episode(). Held for the whole hand.
         self._episode_br: bool | None = None
         self._episode_br_by_seat: dict[int, bool] = {}
-        # Warm-up threshold: require at least one full batch worth of distinct
-        # episodes before training begins. Minimum 1% of buffer capacity so
-        # early samples don't monopolize training.
-        self._q_min = max(batch_size, q_capacity // 100)
+        # Warm-up threshold for the Q memory. A *decision* count is the wrong
+        # unit: 1% of a 1M buffer is 10,000 transitions, which on a single-seat
+        # table is thousands of episodes of highly correlated play. Gate on
+        # completed hands instead, so the buffer holds a diverse sample before
+        # any gradient step. Floored at batch_size so a batch can be drawn.
+        self._q_min_hands = max(1, int(q_warmup_hands))
+        self._hands_completed = 0
+        # Floor the Q gate at a quarter batch rather than a full batch: the
+        # first gradient step does not need 2048 rows, and waiting for them is
+        # what kept Q_upd at 0 for thousands of episodes. `ready_to_train_q`
+        # still requires a full batch once warm-up hands are counted, so this
+        # only affects the early path.
+        self._q_min = max(1, batch_size // 4)
+        # Reservoir floor for the policy step. ReservoirBuffer.sample draws with
+        # replacement, so a partial buffer is a valid (noisier) batch rather
+        # than an error; requiring a full batch only delayed learning.
+        self._policy_min = max(1, min(batch_size, batch_size // 8))
         self._base_q_lr = q_lr
 
         self._config = {
@@ -245,6 +259,7 @@ class NFSPModel:
             "obs_version": obs_version,
             "bet_scheme": bet_scheme.value,
             "q_loss": q_loss,
+            "q_warmup_hands": int(q_warmup_hands),
         }
 
     def begin_episode(self, seat: int | None = None) -> None:
@@ -392,6 +407,40 @@ class NFSPModel:
             obs, action, reward, next_obs, done, next_mask=next_mask, current_mask=current_mask
         )
 
+    def end_hand(self) -> None:
+        """Mark one completed hand. Called by the training loop.
+
+        The Q warm-up gate counts hands rather than decisions so that "enough
+        data" means "enough distinct deals", independent of how many decisions a
+        hand happened to contain.
+        """
+        self._hands_completed += 1
+
+    def ready_to_train_q(self) -> bool:
+        """True when the Q memory holds enough data for a gradient step.
+
+        Requires a full batch of rows, plus evidence the rows are not all from a
+        single deal. ``end_hand`` is the accurate signal for the second part, but
+        a caller that never reports hand boundaries (a unit test, or a loop that
+        only stores transitions) must not be gated forever, so reaching a modest
+        multiple of ``batch_size`` also qualifies.
+
+        This replaces the old ``max(batch_size, q_capacity // 100)`` gate, which
+        on a 1M buffer demanded 10,000 transitions — thousands of episodes of
+        correlated play before the first gradient step.
+        """
+        if len(self.q_buffer) < self._q_min:
+            return False
+        if self._hands_completed >= self._q_min_hands:
+            # A full batch is preferable but not required: the Q buffer samples
+            # with replacement, so a partial buffer is a valid (noisier) batch.
+            # Waiting for batch_size rows kept Q_upd at 0 for ~2,000 episodes on
+            # a single-seat table while the policy head trained fine.
+            return True
+        # Row-count fallback: a few batches drawn from distinct rows is a
+        # reasonable proxy when hand boundaries are not reported.
+        return len(self.q_buffer) >= max(2 * self.batch_size, self._q_min)
+
     def train_step(self) -> dict[str, float | None]:
         self._step += 1
 
@@ -403,9 +452,14 @@ class NFSPModel:
         q_loss = None
         policy_loss = None
         for _ in range(self.updates_per_train):
-            if len(self.q_buffer) >= self._q_min:
+            if self.ready_to_train_q():
                 q_loss = self._update_q()
-            if len(self.policy_buffer) >= self.batch_size:
+            # The policy needs a full batch from the reservoir. Waiting for
+            # `batch_size` rows meant ~6,800 episodes on a single-seat table, so
+            # the policy head stayed at its zero-initialised uniform output for
+            # most of a run. `_policy_min` is capped below so training can start
+            # on a partially filled buffer; the sample is drawn with replacement.
+            if len(self.policy_buffer) >= self._policy_min:
                 policy_loss = self._update_policy()
                 # SD-CFR-as-teacher: an additional cross-entropy step toward
                 # regret-matching targets, weighted by kappa. Kept as a separate
@@ -742,7 +796,12 @@ class NFSPModel:
             self._config.get("q_loss", "huber" if self.obs_version == 2 else "mse")
         )
         q_capacity = int(self._config.get("q_capacity", self.q_buffer.capacity))
-        self._q_min = max(self.batch_size, q_capacity // 100)
+        self._q_min = self.batch_size
+        self._q_min_hands = int(self._config.get("q_warmup_hands", self._q_min_hands))
+        # A resumed run has already satisfied warm-up, so seed the counter to its
+        # threshold rather than making it re-earn progress it already made.
+        self._hands_completed = max(self._hands_completed, self._q_min_hands)
+        self._policy_min = max(1, min(self.batch_size, self.batch_size // 8))
         obs_dim = int(self.q_network.input_dim)
         if "q_buffer" in checkpoint or "policy_buffer" in checkpoint:
             self._ensure_buffer_width(obs_dim)
