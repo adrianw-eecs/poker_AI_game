@@ -89,9 +89,9 @@ def distill_from_teacher(
     obs_batch = np.stack([obs for obs, _ in subset]).astype(np.float32)
     mask_batch = np.stack([mk for _, mk in subset]).astype(np.float32)
 
-    # The teacher may use an older encoder. Its v2 prefix is byte-identical to
-    # the first OBS_V2_DIM entries of a v3 vector (observation_v3 is v2 plus an
-    # appended tendency block), so slice rather than refusing to distil.
+    # The teacher may use an older encoder. v3 and v4 keep the v2 prefix
+    # byte-identical (each version only appends), so slice rather than refusing
+    # to distil.
     teacher_width = int(teacher.advantage_network.input_dim)
     if obs_batch.shape[1] != teacher_width:
         if obs_batch.shape[1] > teacher_width:
@@ -239,10 +239,12 @@ def main() -> None:
     p.add_argument("--updates-per-train", type=int, default=6,
                    help="Gradient updates per training step. More, smaller steps "
                         "on fresher data beats fewer large batches at this model size.")
-    p.add_argument("--obs-version", type=int, default=3, choices=(2, 3),
-                   help="Observation encoder: 2 (318-wide) or 3 (354-wide, adds "
-                        "opponent tendencies + attention). v2 checkpoints cannot "
-                        "load into v3.")
+    p.add_argument("--obs-version", type=int, default=3, choices=(2, 3, 4),
+                   help="Observation encoder: 2 (318-wide), 3 (354-wide, adds "
+                        "opponent tendencies + attention), or 4 (372-wide, adds "
+                        "equity and pot structure). v2 checkpoints cannot load "
+                        "into a later version; the v2 teacher still distils from "
+                        "the shared prefix.")
     p.add_argument("--value-distribution", type=str, default="c51",
                    choices=("none", "c51"),
                    help="Q head: scalar ('none') or categorical distribution ('c51')")

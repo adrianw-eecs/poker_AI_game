@@ -33,8 +33,9 @@ from poker.ml.action_space import BetScheme
 from poker.ml.env import PokerEnv
 from poker.ml.metrics import bb100_interval
 from poker.ml.models.nfsp_model import NFSPModel
-from poker.ml.population import PopulationManager
+from poker.ml.models.nfsp_networks_v3 import checkpoint_obs_version
 from poker.ml.models.sdcfr_model import SDCFRModel
+from poker.ml.population import PopulationManager
 
 # Evaluation constants
 _EVAL_SEED = 17_001
@@ -348,10 +349,11 @@ def main() -> None:
                         help="Policy batch threshold (default: batch_size)")
     parser.add_argument("--model-name", type=str, default="nfsp_v2",
                         help="Model folder name (saved to models/MODEL_NAME/)")
-    parser.add_argument("--obs-version", type=int, default=3, choices=(2, 3),
-                        help="Observation encoder: 2 (318-wide) or 3 (354-wide, adds "
-                             "opponent tendencies + attention). A v2 checkpoint cannot "
-                             "load into v3.")
+    parser.add_argument("--obs-version", type=int, default=3, choices=(2, 3, 4),
+                        help="Observation encoder: 2 (318-wide), 3 (354-wide, adds "
+                             "opponent tendencies + attention), or 4 (372-wide, adds "
+                             "equity and pot structure). Checkpoints do not load across "
+                             "versions.")
     parser.add_argument("--value-distribution", type=str, default="c51",
                         choices=("none", "c51"),
                         help="Q head: scalar ('none') or categorical distribution ('c51')")
@@ -418,15 +420,13 @@ def main() -> None:
         # "Error(s) in loading state_dict" instead of an actionable message.
         _ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         _q_state = _ck.get("q_network", {})
-        _ck_version = 3 if "table_mlp.0.weight" in _q_state and int(
-            _q_state["table_mlp.0.weight"].shape[1]
-        ) + 7 == 354 else (2 if "table_mlp.0.weight" in _q_state else 1)
+        _ck_version = checkpoint_obs_version(_q_state)
         del _ck, _q_state
         if _ck_version != args.obs_version:
             raise SystemExit(
                 f"Refusing {args.checkpoint}: checkpoint obs_version={_ck_version}, "
-                f"but --obs-version is {args.obs_version}. A v2 checkpoint cannot "
-                "load into v3; pass a matching --obs-version or a matching checkpoint."
+                f"but --obs-version is {args.obs_version}. Pass a matching "
+                "--obs-version or a matching checkpoint."
             )
         print(f"[LOAD] {args.checkpoint}")
         training_meta = model.load(args.checkpoint)

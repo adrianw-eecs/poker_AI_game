@@ -47,6 +47,7 @@ from poker.ml.action_space import (
 from poker.ml.observation import OBS_DIM, build_observation
 from poker.ml.observation_v2 import OBS_V2_DIM, build_observation_v2
 from poker.ml.observation_v3 import OBS_V3_DIM, build_observation_v3
+from poker.ml.observation_v4 import OBS_V4_DIM, build_observation_v4
 from poker.ml.tendencies import TendencyTracker
 from poker.rng import RNG
 from poker.state.game_state import GameState, Street
@@ -124,8 +125,8 @@ class PokerEnv(gym.Env):
             )
         if rake_percent < 0 or rake_percent > 10:
             raise ValueError(f"rake_percent must be in [0, 10], got {rake_percent}")
-        if obs_version not in (1, 2, 3):
-            raise ValueError(f"obs_version must be 1, 2 or 3, got {obs_version}")
+        if obs_version not in (1, 2, 3, 4):
+            raise ValueError(f"obs_version must be 1, 2, 3 or 4, got {obs_version}")
 
         self.num_players = num_players
         self.starting_stack = starting_stack
@@ -144,10 +145,10 @@ class PokerEnv(gym.Env):
         self.bet_scheme = bet_scheme
         self.dedup_mask = dedup_mask
         self.obs_version = obs_version
-        self._obs_dim = {1: OBS_DIM, 2: OBS_V2_DIM, 3: OBS_V3_DIM}[obs_version]
-        # v3 appends rolling opponent tendencies, which persist across hands
-        # within one sitting. Reset by reset_multi / start_next_hand_multi.
-        self.tendencies = TendencyTracker(num_players=num_players) if obs_version == 3 else None
+        self._obs_dim = {1: OBS_DIM, 2: OBS_V2_DIM, 3: OBS_V3_DIM, 4: OBS_V4_DIM}[obs_version]
+        # v3 and v4 append rolling opponent tendencies, which persist across
+        # hands within one sitting. Reset by reset_multi / start_next_hand_multi.
+        self.tendencies = TendencyTracker(num_players=num_players) if obs_version >= 3 else None
 
         self.config = GameConfig(
             num_players=num_players,
@@ -177,7 +178,7 @@ class PokerEnv(gym.Env):
         self._bot_for_seat = dict(zip(opponent_seats, opponent_bots))
 
         self.action_space = spaces.Discrete(7)
-        obs_high = 52.0 if obs_version == 2 else 1.0
+        obs_high = 52.0 if obs_version in (2, 4) else 1.0
         self.observation_space = spaces.Box(
             low=0.0, high=obs_high, shape=(self._obs_dim,), dtype=np.float32
         )
@@ -608,6 +609,8 @@ class PokerEnv(gym.Env):
 
     def _observe(self, seat: int) -> npt.NDArray[np.float32]:
         assert self.state is not None
+        if self.obs_version >= 4:
+            return build_observation_v4(self.state, seat, self.tendencies)
         if self.obs_version == 3:
             return build_observation_v3(self.state, seat, self.tendencies)
         if self.obs_version == 2:

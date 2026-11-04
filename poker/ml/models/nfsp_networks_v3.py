@@ -23,8 +23,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from poker.ml.models.nfsp_networks import _ResBlock, _mlp
+from poker.ml.models.nfsp_networks import _linear_layers, _mlp, _ResBlock
 from poker.ml.observation_v3 import OBS_V3_DIM
+from poker.ml.observation_v4 import OBS_V4_DIM
 from poker.ml.tendencies import MAX_SEATS
 
 _CARD_SLOTS = 7
@@ -32,6 +33,10 @@ _EMPTY_CARD = 52
 _SEAT_DIM = 15
 _SEAT_BLOCK_START = 43  # v2 seat block begins here (OBS_SPEC_V2.seats[0])
 _SEAT_BLOCK_END = 178   # 43 + 9 * 15
+# table_in = (features before the seat block) + (features after it)
+#          = input_dim - seat_block_width - card_slots
+# so input_dim = table_in + this offset.
+_TABLE_INPUT_OFFSET = _SEAT_BLOCK_END - (_SEAT_BLOCK_START - _CARD_SLOTS)
 
 
 class SeatAttention(nn.Module):
@@ -103,9 +108,10 @@ class PokerNetV3(nn.Module):
         super().__init__()
         if head_type not in ("value", "policy", "hybrid"):
             raise ValueError(f"head_type must be value/policy/hybrid, got {head_type}")
-        if input_dim != OBS_V3_DIM:
+        if input_dim not in (OBS_V3_DIM, OBS_V4_DIM):
             raise ValueError(
-                f"PokerNetV3 expects the v3 width {OBS_V3_DIM}, got {input_dim}"
+                f"PokerNetV3 expects width {OBS_V3_DIM} (v3) or {OBS_V4_DIM} (v4), "
+                f"got {input_dim}"
             )
         self.input_dim = input_dim
         self.num_actions = num_actions
@@ -145,6 +151,15 @@ class PokerNetV3(nn.Module):
             self.policy_head = nn.Linear(trunk_dim, num_actions)
             nn.init.zeros_(self.policy_head.weight)
             nn.init.zeros_(self.policy_head.bias)
+        # v4 only. The head is supervised by the equity feature so the trunk
+        # has to keep hand strength, not only action values. v3 checkpoints
+        # have no such parameter.
+        if input_dim == OBS_V4_DIM:
+            self.equity_head: nn.Linear | None = nn.Linear(trunk_dim, 1)
+            nn.init.zeros_(self.equity_head.weight)
+            nn.init.zeros_(self.equity_head.bias)
+        else:
+            self.equity_head = None
 
     # -- shared trunk -------------------------------------------------
     def _embed(self, ids: torch.Tensor) -> torch.Tensor:
@@ -265,3 +280,57 @@ def build_policy_network_v3(**kwargs: Any) -> PokerNetV3:
 def build_hybrid_network_v3(**kwargs: Any) -> PokerNetV3:
     kwargs.pop("arch", None)
     return PokerNetV3(head_type="hybrid", **kwargs)
+
+
+def v3_input_dim_from_state(state_dict: dict) -> int:
+    """Recover the observation width from a PokerNetV3 state dict."""
+    return int(state_dict["table_mlp.0.weight"].shape[1]) + _TABLE_INPUT_OFFSET
+
+
+def checkpoint_obs_version(q_state: dict) -> int:
+    """Infer obs version from a Q-network state dict. v1/v2/v3/v4."""
+    if "seat_attn.embed.0.weight" in q_state and "table_mlp.0.weight" in q_state:
+        width = v3_input_dim_from_state(q_state)
+        return 4 if width == OBS_V4_DIM else 3
+    if "rank_emb.weight" in q_state:
+        return 2
+    return 1
+
+
+def v3_kwargs_from_state_dict(state_dict: dict) -> dict:
+    """Recover PokerNetV3 constructor kwargs from a checkpoint state dict."""
+    card_layers = _linear_layers(state_dict, "card_mlp.")
+    table_layers = _linear_layers(state_dict, "table_mlp.")
+    if not card_layers or not table_layers:
+        raise ValueError("PokerNetV3 checkpoint is missing the card or table MLP")
+    num_res_blocks = 0
+    while f"trunk.{num_res_blocks}.fc1.weight" in state_dict:
+        num_res_blocks += 1
+    if num_res_blocks == 0:
+        raise ValueError("PokerNetV3 checkpoint has no residual blocks")
+    fc1 = state_dict["trunk.0.fc1.weight"]
+    trunk_dim = int(fc1.shape[1])
+    if "adv_head.weight" in state_dict:
+        num_actions = int(state_dict["adv_head.weight"].shape[0])
+    elif "policy_head.weight" in state_dict:
+        num_actions = int(state_dict["policy_head.weight"].shape[0])
+    else:
+        raise ValueError("PokerNetV3 checkpoint has no action head")
+    attn_hidden = int(state_dict["seat_attn.embed.0.weight"].shape[0])
+    attn_heads = 4 if attn_hidden % 4 == 0 else 1
+    table_in = int(table_layers[0][1])
+    return {
+        "arch": "v3",
+        "input_dim": table_in + _TABLE_INPUT_OFFSET,
+        "num_actions": num_actions,
+        "rank_dim": int(state_dict["rank_emb.weight"].shape[1]),
+        "suit_dim": int(state_dict["suit_emb.weight"].shape[1]),
+        "card_dim": int(state_dict["card_emb.weight"].shape[1]),
+        "card_hidden": int(card_layers[-1][0]),
+        "table_hidden": int(table_layers[-1][0]),
+        "trunk_dim": trunk_dim,
+        "num_res_blocks": num_res_blocks,
+        "expansion": float(fc1.shape[0]) / float(trunk_dim),
+        "attn_hidden": attn_hidden,
+        "attn_heads": attn_heads,
+    }

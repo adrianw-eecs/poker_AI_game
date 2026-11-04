@@ -7,6 +7,8 @@ from poker.ml.action_space import BetScheme, action_index_to_action, build_actio
 from poker.ml.models.nfsp_model import NFSPModel
 from poker.ml.observation import build_observation
 from poker.ml.observation_v2 import build_observation_v2
+from poker.ml.observation_v3 import build_observation_v3
+from poker.ml.observation_v4 import build_observation_v4
 from poker.state.game_state import GameState
 
 
@@ -38,7 +40,12 @@ class NFSPBot(BaseMLBot):
             self._pending_episode = False
 
         seat = self._find_seat(state)
-        if int(getattr(self.model, "obs_version", 1)) == 2:
+        version = int(getattr(self.model, "obs_version", 1))
+        if version >= 4:
+            obs = build_observation_v4(state, seat)
+        elif version == 3:
+            obs = build_observation_v3(state, seat)
+        elif version == 2:
             obs = build_observation_v2(state, seat)
         else:
             obs = build_observation(state, seat)

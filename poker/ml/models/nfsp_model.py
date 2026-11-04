@@ -11,9 +11,6 @@ import torch.optim as optim
 from poker.ml.action_space import BetScheme
 from poker.ml.buffers import CircularBuffer, ReservoirBuffer, WeightedCircularBuffer
 from poker.ml.cfr.regret_matching import regret_matching
-from poker.ml.observation import adapt_observation
-from poker.ml.observation_v2 import OBS_V2_DIM
-from poker.ml.observation_v3 import OBS_V3_DIM
 from poker.ml.models.nfsp_networks import (
     build_hybrid_network_v2,
     build_policy_network,
@@ -28,7 +25,13 @@ from poker.ml.models.nfsp_networks_v3 import (
     build_hybrid_network_v3,
     build_policy_network_v3,
     build_q_network_v3,
+    v3_input_dim_from_state,
+    v3_kwargs_from_state_dict,
 )
+from poker.ml.observation import adapt_observation
+from poker.ml.observation_v2 import OBS_V2_DIM
+from poker.ml.observation_v3 import OBS_V3_DIM
+from poker.ml.observation_v4 import EQUITY_INDEX, OBS_V4_DIM
 
 # Maximum entries persisted per buffer when saving a checkpoint.
 # Avoids multi-GB checkpoints for large buffers while still warm-starting the
@@ -43,11 +46,13 @@ _ILLEGAL_LOGIT = -1.0e9
 
 
 def _checkpoint_arch(state: dict) -> str:
+    if "seat_attn.embed.0.weight" in state:
+        return "v3"
     if "rank_emb.weight" in state:
         return "v2"
     if "input_proj.0.weight" in state:
         return "v1"
-    raise ValueError("Checkpoint network is neither PokerNetwork nor PokerNetV2")
+    raise ValueError("Checkpoint network is neither PokerNetwork, PokerNetV2, nor PokerNetV3")
 
 
 def _checkpoint_actions(state: dict) -> int:
@@ -76,7 +81,8 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
         )
     if meta:
         version = int(meta["obs_version"])
-        if (version == 2 and q_arch != "v2") or (version == 1 and q_arch != "v1"):
+        expected = {1: "v1", 2: "v2", 3: "v3", 4: "v3"}.get(version)
+        if expected is not None and q_arch != expected:
             raise ValueError(
                 f"Checkpoint metadata obs_version={version} does not match {q_arch} weights"
             )
@@ -85,6 +91,8 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
             raise ValueError("Checkpoint metadata arch=pokernet_v2 does not match the weights")
         if label == "pokernet_v1" and q_arch != "v1":
             raise ValueError("Checkpoint metadata arch=pokernet_v1 does not match the weights")
+        if label == "pokernet_v3" and q_arch != "v3":
+            raise ValueError("Checkpoint metadata arch=pokernet_v3 does not match the weights")
         if int(meta.get("num_actions", q_actions)) != q_actions:
             raise ValueError(
                 f"Checkpoint metadata num_actions={meta.get('num_actions')} "
@@ -96,6 +104,23 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
             raise ValueError(
                 f"PokerNetV2 checkpoint input width {width} does not match obs v2 ({OBS_V2_DIM})"
             )
+    if q_arch == "v3":
+        width = v3_input_dim_from_state(q_state)
+        if width not in (OBS_V3_DIM, OBS_V4_DIM):
+            raise ValueError(
+                f"PokerNetV3 checkpoint input width {width} is neither "
+                f"obs v3 ({OBS_V3_DIM}) nor obs v4 ({OBS_V4_DIM})"
+            )
+        if meta:
+            version = int(meta["obs_version"])
+            if version == 3 and width != OBS_V3_DIM:
+                raise ValueError(
+                    f"Checkpoint says obs v3 but the network width is {width}"
+                )
+            if version == 4 and width != OBS_V4_DIM:
+                raise ValueError(
+                    f"Checkpoint says obs v4 but the network width is {width}"
+                )
     return q_arch
 
 
@@ -145,10 +170,10 @@ class NFSPModel:
         vmin: float = -10.0,
         vmax: float = 10.0,
     ) -> None:
-        if obs_version not in (1, 2, 3):
-            raise ValueError(f"obs_version must be 1, 2 or 3, got {obs_version}")
-        if shared_trunk and obs_version not in (2, 3):
-            raise ValueError("shared_trunk requires obs_version 2 or 3")
+        if obs_version not in (1, 2, 3, 4):
+            raise ValueError(f"obs_version must be 1, 2, 3 or 4, got {obs_version}")
+        if shared_trunk and obs_version not in (2, 3, 4):
+            raise ValueError("shared_trunk requires obs_version 2, 3 or 4")
         if not 0.0 <= distill_kappa <= 1.0:
             raise ValueError(f"distill_kappa must be in [0, 1], got {distill_kappa}")
         if not 0.0 <= reservoir_min_prob < 1.0:
@@ -214,7 +239,7 @@ class NFSPModel:
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        obs_dim = {1: 98, 2: OBS_V2_DIM, 3: OBS_V3_DIM}[obs_version]
+        obs_dim = {1: 98, 2: OBS_V2_DIM, 3: OBS_V3_DIM, 4: OBS_V4_DIM}[obs_version]
         # float16 halves buffer memory. v3 keeps float32: the tendency block is
         # already small and low-magnitude, and quantising it costs accuracy on
         # exactly the features that are hardest to learn.
@@ -222,14 +247,15 @@ class NFSPModel:
         if obs_version == 1:
             self.q_network = build_q_network().to(self.device)
             self.policy_network = build_policy_network().to(self.device)
-        elif obs_version == 3:
+        elif obs_version in (3, 4):
+            net_dim = OBS_V4_DIM if obs_version == 4 else OBS_V3_DIM
             if shared_trunk:
-                hybrid_v3 = build_hybrid_network_v3().to(self.device)
+                hybrid_v3 = build_hybrid_network_v3(input_dim=net_dim).to(self.device)
                 self.q_network = hybrid_v3
                 self.policy_network = hybrid_v3
             else:
-                self.q_network = build_q_network_v3().to(self.device)
-                self.policy_network = build_policy_network_v3().to(self.device)
+                self.q_network = build_q_network_v3(input_dim=net_dim).to(self.device)
+                self.policy_network = build_policy_network_v3(input_dim=net_dim).to(self.device)
         elif shared_trunk:
             # One network, two heads: the policy head and the dueling Q head
             # share card embeddings and the residual trunk.
@@ -239,7 +265,7 @@ class NFSPModel:
         else:
             self.q_network = build_q_network_v2().to(self.device)
             self.policy_network = build_policy_network_v2().to(self.device)
-        self.shared_trunk = bool(shared_trunk and obs_version in (2, 3))
+        self.shared_trunk = bool(shared_trunk and obs_version in (2, 3, 4))
         # A shared module cannot be deep-copied independently of its optimizer
         # wiring, but a frozen copy is exactly what the target net needs.
         self.target_network = make_target_network(self.q_network).to(self.device)
@@ -411,7 +437,7 @@ class NFSPModel:
             probs = self._distributional_forward(network, obs_t)
             q_vals = (probs * self._support.to(dtype=probs.dtype)).sum(dim=-1)
             return q_vals.masked_fill(~mask_t, _ILLEGAL_LOGIT)
-        if self.obs_version in (2, 3):
+        if self.obs_version >= 2:
             q_vals = network(obs_t, legal_mask=mask_t)
         else:
             q_vals = network(obs_t)
@@ -752,7 +778,7 @@ class NFSPModel:
             # target net evaluates it.
             next_q_online = self._masked_q(self.q_network, next_obs_t, next_mask_t)
             next_actions = next_q_online.argmax(dim=1)
-            if self.obs_version in (2, 3):
+            if self.obs_version >= 2:
                 next_q_target = self.target_network(next_obs_t, legal_mask=next_mask_t)
             else:
                 next_q_target = self.target_network(next_obs_t)
@@ -774,14 +800,26 @@ class NFSPModel:
         self.q_network.train()
         # PokerNetwork (v1) takes no legal_mask argument; PokerNetV2 does.
         # _masked_q routes per architecture so both shapes stay legal.
-        q_vals = self._masked_q(self.q_network, obs_t, current_masks_t)
+        # v4 shares one trunk pass between the Q head and the equity head.
+        aux = obs_t.new_zeros(())
+        equity_head = getattr(self.q_network, "equity_head", None)
+        q_heads = getattr(self.q_network, "heads", None)
+        if isinstance(equity_head, nn.Linear) and callable(q_heads):
+            hidden = self.q_network.trunk_forward(obs_t)
+            q_raw, _logits = q_heads(hidden, current_masks_t)
+            if q_raw is None:
+                raise RuntimeError("equity head is attached to a network with no value head")
+            q_vals = q_raw.masked_fill(~current_masks_t, _ILLEGAL_LOGIT)
+            aux = self._equity_aux_loss(self.q_network, obs_t, hidden)
+        else:
+            q_vals = self._masked_q(self.q_network, obs_t, current_masks_t)
         predicted_q = q_vals.gather(1, actions_t.unsqueeze(1)).squeeze(1)
         if self.q_loss_name == "huber":
             q_loss = nn.functional.smooth_l1_loss(predicted_q, td_targets)
         else:
             q_loss = nn.functional.mse_loss(predicted_q, td_targets)
 
-        total_loss = q_loss
+        total_loss = q_loss + aux
         # The fold-return target reads the v2 committed-fraction feature, so it
         # only carries information under obs v2. Under v1 fold_return is a
         # constant zero, which would add a pure shrinkage term on the fold Q
@@ -841,12 +879,25 @@ class NFSPModel:
             target = target / target.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
         self.q_network.train()
-        raw = self._distributional_raw(obs_t)
+        aux = obs_t.new_zeros(())
+        equity_head = getattr(self.q_network, "equity_head", None)
+        if isinstance(equity_head, nn.Linear) and hasattr(self.q_network, "trunk_forward"):
+            hidden = self.q_network.trunk_forward(obs_t)
+            # dist_head is attached after construction, so it is not on the
+            # declared network type.
+            dist_head = getattr(self.q_network, "dist_head", None)
+            if not callable(dist_head):
+                raw = self._distributional_raw(obs_t)
+            else:
+                raw = dist_head(hidden).view(-1, self.num_actions, self.num_atoms)
+            aux = self._equity_aux_loss(self.q_network, obs_t, hidden)
+        else:
+            raw = self._distributional_raw(obs_t)
         log_probs = torch.log_softmax(raw.view(-1, self.num_actions, self.num_atoms), dim=-1)
         picked = log_probs.gather(
             1, actions_t.view(-1, 1, 1).expand(-1, 1, self.num_atoms)
         ).squeeze(1)
-        loss = -(target * picked).sum(dim=-1).mean()
+        loss = -(target * picked).sum(dim=-1).mean() + aux
 
         self.q_optimizer.zero_grad()
         loss.backward()
@@ -939,8 +990,19 @@ class NFSPModel:
         plabels_t = torch.as_tensor(pbatch["actions"], dtype=torch.int64, device=self.device)
         masks_t = torch.as_tensor(pbatch["masks"], dtype=torch.bool, device=self.device)
 
-        logits = self.policy_network(pobs_t).masked_fill(~masks_t, _ILLEGAL_LOGIT)
-        policy_loss = nn.functional.cross_entropy(logits, plabels_t)
+        aux = pobs_t.new_zeros(())
+        equity_head = getattr(self.policy_network, "equity_head", None)
+        p_heads = getattr(self.policy_network, "heads", None)
+        if isinstance(equity_head, nn.Linear) and callable(p_heads):
+            hidden = self.policy_network.trunk_forward(pobs_t)
+            _q_values, logits = p_heads(hidden, None)
+            if logits is None:
+                raise RuntimeError("equity head is attached to a network with no policy head")
+            logits = logits.masked_fill(~masks_t, _ILLEGAL_LOGIT)
+            aux = self._equity_aux_loss(self.policy_network, pobs_t, hidden)
+        else:
+            logits = self.policy_network(pobs_t).masked_fill(~masks_t, _ILLEGAL_LOGIT)
+        policy_loss = nn.functional.cross_entropy(logits, plabels_t) + aux
 
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
@@ -989,7 +1051,9 @@ class NFSPModel:
                     "obs_version": self.obs_version,
                     "bet_scheme": self.bet_scheme.value,
                     "num_actions": self.num_actions,
-                    "arch": "pokernet_v2" if self.obs_version == 2 else "pokernet_v1",
+                    "arch": {1: "pokernet_v1", 2: "pokernet_v2", 3: "pokernet_v3", 4: "pokernet_v3"}[
+                        self.obs_version
+                    ],
                     "shared_trunk": self.shared_trunk,
                     "distill_kappa": self.distill_kappa,
                 },
@@ -1000,19 +1064,46 @@ class NFSPModel:
             filepath,
         )
 
+    def _equity_aux_loss(
+        self, network: nn.Module, obs_t: torch.Tensor, hidden: torch.Tensor
+    ) -> torch.Tensor:
+        """MSE between the equity head and the equity feature already in the obs.
+
+        Zero when the network has no equity head, so v1-v3 updates are unchanged.
+        """
+        head = getattr(network, "equity_head", None)
+        if self.obs_version != 4 or not isinstance(head, nn.Linear):
+            return obs_t.new_zeros(())
+        predicted = torch.sigmoid(head(hidden).squeeze(-1))
+        return nn.functional.mse_loss(predicted, obs_t[:, EQUITY_INDEX])
+
     def _rebuild_networks(self, q_state: dict, policy_state: dict) -> None:
         """Replace trunks so checkpoint shapes (width, depth, input) match."""
-        q_kwargs = network_kwargs_from_state_dict(q_state)
-        policy_kwargs = network_kwargs_from_state_dict(policy_state)
-        q_arch = q_kwargs.pop("arch")
-        policy_kwargs.pop("arch", None)
         q_lr = float(self._config.get("q_lr", self._config.get("lr", self.q_lr)))
         policy_lr = float(self._config.get("policy_lr", self._config.get("lr", self.policy_lr)))
+        if "seat_attn.embed.0.weight" in q_state:
+            q_kwargs = v3_kwargs_from_state_dict(q_state)
+            policy_kwargs = v3_kwargs_from_state_dict(policy_state)
+            q_arch = "v3"
+        else:
+            q_kwargs = network_kwargs_from_state_dict(q_state)
+            policy_kwargs = network_kwargs_from_state_dict(policy_state)
+            q_arch = str(q_kwargs["arch"])
+        q_kwargs.pop("arch", None)
+        policy_kwargs.pop("arch", None)
 
         # A shared-trunk checkpoint stores ONE module's state under both keys and
-        # carries a policy_head, which a plain PokerNetV2 would reject.
+        # carries a policy_head, which a plain value network would reject.
         hybrid_state = "policy_head.weight" in q_state
-        if hybrid_state:
+        if hybrid_state and q_arch == "v3":
+            self.shared_trunk = True
+            hybrid = build_hybrid_network_v3(**q_kwargs).to(self.device)
+            self.q_network = hybrid
+            self.policy_network = hybrid
+            self.target_network = make_target_network(hybrid).to(self.device)
+            self.q_optimizer = optim.Adam(hybrid.parameters(), lr=q_lr)
+            self.policy_optimizer = optim.Adam(hybrid.parameters(), lr=policy_lr)
+        elif hybrid_state:
             self.shared_trunk = True
             hybrid = build_hybrid_network_v2(**q_kwargs).to(self.device)
             self.q_network = hybrid
@@ -1020,6 +1111,12 @@ class NFSPModel:
             self.target_network = make_target_network(hybrid).to(self.device)
             self.q_optimizer = optim.Adam(hybrid.parameters(), lr=q_lr)
             self.policy_optimizer = optim.Adam(hybrid.parameters(), lr=policy_lr)
+        elif q_arch == "v3":
+            self.q_network = build_q_network_v3(**q_kwargs).to(self.device)
+            self.policy_network = build_policy_network_v3(**policy_kwargs).to(self.device)
+            self.target_network = make_target_network(self.q_network).to(self.device)
+            self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
+            self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=policy_lr)
         elif q_arch == "v2":
             self.q_network = build_q_network_v2(**q_kwargs).to(self.device)
             self.policy_network = build_policy_network_v2(**policy_kwargs).to(self.device)
@@ -1107,13 +1204,21 @@ class NFSPModel:
         self._config = dict(checkpoint.get("config") or {})
         self._config.setdefault("q_lr", self._config.get("lr", self.q_lr))
         self._config.setdefault("policy_lr", self._config.get("lr", self.policy_lr))
-        self.obs_version = 2 if arch == "v2" else 1
+        if arch == "v3":
+            width = v3_input_dim_from_state(q_state)
+            self.obs_version = 4 if width == OBS_V4_DIM else 3
+        elif arch == "v2":
+            self.obs_version = 2
+        else:
+            self.obs_version = 1
         if meta.get("bet_scheme"):
             self.bet_scheme = BetScheme(meta["bet_scheme"])
         elif self._config.get("bet_scheme"):
             self.bet_scheme = BetScheme(self._config["bet_scheme"])
         else:
-            self.bet_scheme = BetScheme.POT_FRACTION if arch == "v2" else BetScheme.LEGACY
+            self.bet_scheme = (
+                BetScheme.POT_FRACTION if arch in ("v2", "v3") else BetScheme.LEGACY
+            )
         self._config["obs_version"] = self.obs_version
         self._config["bet_scheme"] = self.bet_scheme.value
         self._obs_dtype = np.dtype(np.float16 if self.obs_version == 2 else np.float32)
