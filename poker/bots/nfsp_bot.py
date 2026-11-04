@@ -9,6 +9,7 @@ from poker.ml.observation import build_observation
 from poker.ml.observation_v2 import build_observation_v2
 from poker.ml.observation_v3 import build_observation_v3
 from poker.ml.observation_v4 import build_observation_v4
+from poker.ml.observation_v5 import build_observation_v5
 from poker.state.game_state import GameState
 
 
@@ -41,7 +42,9 @@ class NFSPBot(BaseMLBot):
 
         seat = self._find_seat(state)
         version = int(getattr(self.model, "obs_version", 1))
-        if version >= 4:
+        if version >= 5:
+            obs = build_observation_v5(state, seat)
+        elif version >= 4:
             obs = build_observation_v4(state, seat)
         elif version == 3:
             obs = build_observation_v3(state, seat)

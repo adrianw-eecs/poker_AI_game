@@ -49,19 +49,44 @@ def test_next_hand_carries_stacks_and_rotates_the_button() -> None:
     assert env.player_stacks_at_hand_start[1] == 1025
 
 
-def test_sitting_ends_when_a_player_cannot_post_the_big_blind() -> None:
+def test_short_stack_posts_an_all_in_blind_and_the_sitting_continues() -> None:
+    """A stack below the big blind is a short all-in, not the end of the sitting."""
+    env = PokerEnv(
+        num_players=3,
+        learning_seat=0,
+        opponent_bots=[CallBot(), CallBot()],
+        small_blind=25,
+        big_blind=50,
+        starting_stack=1000,
+        seed=3,
+    )
+    env.hand_number = 0
+    env.reset(options={"stacks": (1000, 1000, 10)})
+    assert env.state is not None
+    assert env.state.dealer_seat == 0
+    # Seat 2 is the big blind and posts the 10 chips it has.
+    big_blind = env.state.players[2]
+    assert big_blind.is_all_in
+    assert big_blind.stack == 0
+    assert big_blind.committed_this_street == 10
+    assert sum(player.stack + player.committed_this_hand for player in env.state.players) == 2010
+    assert env.state.action_on_seat is not None
+
+
+def test_sitting_ends_when_one_live_seat_remains() -> None:
     env = _heads_up()
     env.hand_number = 2
     env.reset()
     assert env.state is not None
-    assert env.state.dealer_seat == 0
-    short = tuple(
-        player.with_stack(40) if player.seat == 1 else player
+    busted = tuple(
+        player.with_stack(0) if player.seat == 1 else player.with_stack(player.stack + env.state.players[1].stack)
         for player in env.state.players
     )
-    env.state = dc_replace(env.state, players=short)
+    env.state = dc_replace(env.state, players=busted)
     assert env.start_next_hand(seed=1) is None
     assert env.hand_number == 2
+    assert env.state.players[1].is_eliminated
+    assert env.state.players[1].stack == 0
 
 
 def test_max_bet_collapses_raises_to_the_cap() -> None:

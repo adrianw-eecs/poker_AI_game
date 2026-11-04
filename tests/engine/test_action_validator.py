@@ -81,3 +81,71 @@ def test_short_stack_goes_all_in() -> None:
     types = [a.type for a in legal_actions(state, 0)]
     assert ActionType.ALL_IN in types
     assert ActionType.RAISE not in types
+
+
+def test_short_allin_does_not_reopen_for_a_player_who_acted() -> None:
+    """A player who already bet may only call a short all-in, not raise over it."""
+    from dataclasses import replace
+
+    acted = _player(0, 500, committed=100)
+    short = _player(1, 0, committed=140).with_all_in(True)
+    waiting = _player(2, 500, committed=0)
+    state = _state([acted, short, waiting], action_on=0, bet=140, last_raise=100)
+    state = replace(
+        state,
+        street=Street.FLOP,
+        action_history_this_street=[
+            (0, Action.raise_to(100)),
+            (1, Action.all_in(140)),
+        ],
+    )
+    types = [action.type for action in legal_actions(state, 0)]
+    assert ActionType.FOLD in types
+    assert ActionType.CALL in types
+    assert ActionType.RAISE not in types
+    assert ActionType.ALL_IN not in types
+    with pytest.raises(IllegalActionError, match="re-open"):
+        validate(state, 0, Action.raise_to(240))
+    with pytest.raises(IllegalActionError, match="re-open"):
+        validate(state, 0, Action.all_in(600))
+
+    still_to_act = replace(state, action_on_seat=2)
+    waiting_types = [action.type for action in legal_actions(still_to_act, 2)]
+    assert ActionType.RAISE in waiting_types
+
+
+def test_opening_short_allin_can_still_be_raised() -> None:
+    """The first wager of a street is not an incomplete raise."""
+    from dataclasses import replace
+
+    checker = _player(0, 500, committed=0)
+    short = _player(1, 0, committed=15).with_all_in(True)
+    state = _state([checker, short], action_on=0, bet=15, last_raise=0)
+    state = replace(
+        state,
+        street=Street.FLOP,
+        action_history_this_street=[
+            (0, Action.check()),
+            (1, Action.all_in(15)),
+        ],
+    )
+    types = [action.type for action in legal_actions(state, 0)]
+    assert ActionType.RAISE in types
+
+
+def test_full_allin_raise_reopens() -> None:
+    from dataclasses import replace
+
+    acted = _player(0, 500, committed=100)
+    full = _player(1, 0, committed=200).with_all_in(True)
+    state = _state([acted, full], action_on=0, bet=200, last_raise=100)
+    state = replace(
+        state,
+        street=Street.FLOP,
+        action_history_this_street=[
+            (0, Action.raise_to(100)),
+            (1, Action.all_in(200)),
+        ],
+    )
+    types = [action.type for action in legal_actions(state, 0)]
+    assert ActionType.RAISE in types

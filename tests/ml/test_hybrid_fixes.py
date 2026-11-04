@@ -110,6 +110,57 @@ def test_distillation_targets_are_not_degenerate_on_average() -> None:
     )
 
 
+def test_roster_without_checkpoints_uses_all_three_baselines(tmp_path) -> None:
+    from poker.ml.roster import CheckpointRoster
+
+    roster = CheckpointRoster(tmp_path, obs_version=2, teacher=None)
+    assert roster.refresh() == 0
+    bots = roster.seat(3, np.random.default_rng(0))
+    assert {type(bot).__name__ for bot in bots} == {"RandomBot", "FlopBot", "CallBot"}
+
+
+def test_gate_baseline_cells_are_reported_separately() -> None:
+    from poker.ml.gate import evaluate_gate
+
+    model = NFSPModel(
+        obs_version=2,
+        bet_scheme=BetScheme.POT_FRACTION,
+        batch_size=4,
+        q_capacity=8,
+        policy_capacity=8,
+    )
+    report = evaluate_gate(model, None, hands=1, fields=(), depths=())
+    assert [cell.name for cell in report.baselines] == ["6max_call", "6max_flop", "6max_random"]
+    assert report.head_to_head == ()
+    assert report.selection_lower == min(cell.share_low for cell in report.baselines)
+
+
+def test_v5_learner_refuses_a_v2_teacher() -> None:
+    from poker.ml.observation_v5 import OBS_V5_DIM
+    from scripts.train_hybrid import distill_from_teacher
+
+    teacher = SDCFRModel(obs_version=2)
+    learner = NFSPModel(obs_version=5, bet_scheme=BetScheme.POT_FRACTION, batch_size=8, q_capacity=16, policy_capacity=16)
+    states = [(np.zeros(OBS_V5_DIM, dtype=np.float32), MASK.copy())]
+    with pytest.raises(ValueError, match="Refusing to distill"):
+        distill_from_teacher(learner, teacher, states)
+
+
+def test_tendency_half_life_forgets_early_hands() -> None:
+    from poker.domain.action import ActionType
+    from poker.ml.tendencies import TendencyTracker
+
+    tracker = TendencyTracker(num_players=2, half_life=1.0)
+    for _ in range(30):
+        tracker.start_hand()
+        tracker.record_action(
+            0, ActionType.RAISE, street_is_preflop=True, facing_bet=False
+        )
+        tracker.end_hand()
+    assert tracker.hands_seen(0) < 5
+    assert 0.0 < tracker.confidence(0) < 1.0
+
+
 # ------------------------------------------------- 2. early stopping
 
 

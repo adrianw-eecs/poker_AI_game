@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from poker.ml.models.nfsp_networks import _linear_layers, _mlp, _ResBlock
 from poker.ml.observation_v3 import OBS_V3_DIM
 from poker.ml.observation_v4 import OBS_V4_DIM
+from poker.ml.observation_v5 import OBS_V5_DIM
 from poker.ml.tendencies import MAX_SEATS
 
 _CARD_SLOTS = 7
@@ -108,10 +109,10 @@ class PokerNetV3(nn.Module):
         super().__init__()
         if head_type not in ("value", "policy", "hybrid"):
             raise ValueError(f"head_type must be value/policy/hybrid, got {head_type}")
-        if input_dim not in (OBS_V3_DIM, OBS_V4_DIM):
+        if input_dim not in (OBS_V3_DIM, OBS_V4_DIM, OBS_V5_DIM):
             raise ValueError(
-                f"PokerNetV3 expects width {OBS_V3_DIM} (v3) or {OBS_V4_DIM} (v4), "
-                f"got {input_dim}"
+                f"PokerNetV3 expects width {OBS_V3_DIM} (v3), {OBS_V4_DIM} (v4) "
+                f"or {OBS_V5_DIM} (v5), got {input_dim}"
             )
         self.input_dim = input_dim
         self.num_actions = num_actions
@@ -154,7 +155,7 @@ class PokerNetV3(nn.Module):
         # v4 only. The head is supervised by the equity feature so the trunk
         # has to keep hand strength, not only action values. v3 checkpoints
         # have no such parameter.
-        if input_dim == OBS_V4_DIM:
+        if input_dim >= OBS_V4_DIM:
             self.equity_head: nn.Linear | None = nn.Linear(trunk_dim, 1)
             nn.init.zeros_(self.equity_head.weight)
             nn.init.zeros_(self.equity_head.bias)
@@ -291,6 +292,8 @@ def checkpoint_obs_version(q_state: dict) -> int:
     """Infer obs version from a Q-network state dict. v1/v2/v3/v4."""
     if "seat_attn.embed.0.weight" in q_state and "table_mlp.0.weight" in q_state:
         width = v3_input_dim_from_state(q_state)
+        if width == OBS_V5_DIM:
+            return 5
         return 4 if width == OBS_V4_DIM else 3
     if "rank_emb.weight" in q_state:
         return 2
