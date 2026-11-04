@@ -50,6 +50,7 @@ from poker.domain.hand import HandRank, HandType
 from poker.evaluation.equity import monte_carlo_equity
 from poker.evaluation.fast_evaluator import card_index, fast_evaluate, intra_category
 from poker.ml.observation_v2 import _preflop_equity, _ratio, _sat
+from poker.ml.observation_v2 import MoneyUnit
 from poker.ml.observation_v3 import OBS_V3_DIM, build_observation_v3
 from poker.ml.tendencies import TendencyTracker
 from poker.rng import RNG
@@ -258,13 +259,14 @@ def build_observation_v4(
     state: GameState,
     seat: int,
     tendencies: TendencyTracker | None = None,
+    money_unit: MoneyUnit = "buyin",
 ) -> npt.NDArray[np.float32]:
     """Build the v4 vector for ``seat``.
 
     The first ``OBS_V3_DIM`` entries are exactly ``build_observation_v3`` for
     the same state, seat, and tendency tracker.
     """
-    base = build_observation_v3(state, seat, tendencies)
+    base = build_observation_v3(state, seat, tendencies, money_unit)
     block = np.asarray(
         _strength_block(state, seat) + _structure_block(state, seat),
         dtype=np.float32,

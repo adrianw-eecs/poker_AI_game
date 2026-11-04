@@ -92,6 +92,32 @@ def test_env_episode_completes_and_chip_conservation() -> None:
     assert np.isfinite(final_reward), f"Terminal reward is not finite: {final_reward}"
 
 
+def test_terminal_reward_is_the_prize_share_delta() -> None:
+    """Winning the opponent's stack moves winner-take-all equity by that share."""
+    from poker.bots.call_bot import CallBot
+    from poker.ml.env import REWARD_SCALE
+
+    env = PokerEnv(
+        num_players=2,
+        starting_stack=1000,
+        small_blind=25,
+        big_blind=50,
+        learning_seat=0,
+        opponent_bots=[CallBot()],
+        seed=1,
+    )
+    env.hand_number = 0
+    env.reset()
+    _, _, done, _, _ = env.step(0)
+    assert done and env.state is not None
+    before = env.player_stacks_at_hand_start
+    total = sum(before.values())
+    after = env.state.players[0].stack
+    expected = REWARD_SCALE * (after / total - before[0] / total)
+    assert env._compute_reward(0) == pytest.approx(expected)
+    assert abs(env._compute_reward(0) + env._compute_reward(1)) < 1e-6
+
+
 def test_env_episode_reward_range() -> None:
     """Terminal reward should be within [-1, 1] (normalised stack delta)."""
     from poker.bots.random_bot import RandomBot
@@ -153,7 +179,7 @@ def test_env_six_player_episode() -> None:
 
 
 def test_folding_the_small_blind_is_a_loss() -> None:
-    """The chip baseline is the stack before blinds are posted."""
+    """Folding the small blind loses that fraction of the chips in play."""
     from poker.bots.call_bot import CallBot
 
     env = PokerEnv(
@@ -171,7 +197,8 @@ def test_folding_the_small_blind_is_a_loss() -> None:
     assert done
     assert env.state is not None
     assert env.state.players[0].stack == 975
-    assert reward == pytest.approx(-0.0125)
+    # 25 chips out of a 2,000-chip pool, scaled by REWARD_SCALE.
+    assert reward == pytest.approx(-0.00625)
 
 
 def test_limp_reaches_a_flop_with_no_live_bet() -> None:
@@ -348,3 +375,173 @@ def test_half_raise_does_not_reopen() -> None:
     assert reopens_betting(Action.raise_to(200), prior_max=100, prior_min=100)
     assert not reopens_betting(Action.all_in(150), prior_max=100, prior_min=100)
     assert reopens_betting(Action.all_in(200), prior_max=100, prior_min=100)
+
+
+def _call_hand_to_showdown(env: PokerEnv) -> None:
+    """Finish the current hand by calling whenever that is legal."""
+    from poker.state.game_state import Street
+
+    if env.state is not None and env.state.street == Street.SHOWDOWN:
+        return
+    done = False
+    steps = 0
+    while not done and steps < 80:
+        if env.state is None or env.state.action_on_seat is None:
+            break
+        if env.state.street == Street.SHOWDOWN:
+            return
+        mask = env.get_action_mask()
+        action = 1 if mask[1] else int(np.flatnonzero(mask)[0])
+        _, _, done, _, _ = env.step(action)
+        steps += 1
+    assert done or (env.state is not None and env.state.street == Street.SHOWDOWN)
+
+
+def test_ante_clamps_a_short_stack_and_conserves_chips() -> None:
+    from poker.bots.call_bot import CallBot
+    from poker.config.blind_schedule import BlindLevel, BlindSchedule
+
+    schedule = BlindSchedule(
+        levels=[BlindLevel(10, 20, 25)],
+        hands_per_level=10,
+        fixed=True,
+    )
+    env = PokerEnv(
+        num_players=3,
+        starting_stack=100,
+        learning_seat=0,
+        opponent_bots=[CallBot(), CallBot()],
+        seed=1,
+        blind_schedule=schedule,
+    )
+    env.reset(options={"stacks": (100, 10, 100)})
+    assert env.state is not None
+    short = env.state.players[1]
+    assert short.stack >= 0
+    assert short.is_all_in
+    assert short.stack + short.committed_this_hand == 10
+    assert sum(player.stack + player.committed_this_hand for player in env.state.players) == 210
+
+
+def test_chip_conservation_across_a_sitting_with_antes() -> None:
+    """Stacks sum to the same total from 2 to 9 seats, across carried hands."""
+    from poker.bots.call_bot import CallBot
+    from poker.config.blind_schedule import BlindLevel, BlindSchedule
+
+    schedule = BlindSchedule(
+        levels=[
+            BlindLevel(10, 20, 0),
+            BlindLevel(25, 50, 10),
+            BlindLevel(100, 200, 25),
+        ],
+        hands_per_level=2,
+        fixed=False,
+    )
+    for num_players in range(2, 10):
+        raw = tuple(80 if seat % 2 == 0 else 35 for seat in range(num_players))
+        total = sum(raw)
+        env = PokerEnv(
+            num_players=num_players,
+            starting_stack=200,
+            learning_seat=0,
+            opponent_bots=[CallBot() for _ in range(num_players - 1)],
+            seed=num_players + 3,
+            blind_schedule=schedule,
+        )
+        env.reset(options={"stacks": raw, "deck_seed": num_players})
+        assert env.state is not None
+        assert sum(
+            player.stack + player.committed_this_hand for player in env.state.players
+        ) == total
+        for hand in range(6):
+            if hand:
+                opened = env.start_next_hand(seed=100 + hand + num_players)
+                if opened is None:
+                    break
+                assert env.state is not None
+                assert sum(
+                    player.stack + player.committed_this_hand for player in env.state.players
+                ) == total
+            _call_hand_to_showdown(env)
+            assert env.state is not None
+            assert all(player.stack >= 0 for player in env.state.players)
+            assert sum(player.stack for player in env.state.players) == total
+            assert all(
+                player.is_eliminated for player in env.state.players if player.stack <= 0
+            )
+
+
+def test_busted_seat_stays_eliminated_and_the_button_skips_it() -> None:
+    from dataclasses import replace as dc_replace
+
+    from poker.bots.call_bot import CallBot
+
+    env = PokerEnv(
+        num_players=3,
+        starting_stack=300,
+        small_blind=10,
+        big_blind=20,
+        learning_seat=0,
+        opponent_bots=[CallBot(), CallBot()],
+        seed=1,
+    )
+    env.hand_number = 0
+    env.reset()
+    _call_hand_to_showdown(env)
+    assert env.state is not None
+    assert sum(player.stack for player in env.state.players) == 900
+    assert env.state.dealer_seat == 0
+    moved = env.state.players[1].stack
+    players = list(env.state.players)
+    players[0] = players[0].with_stack(players[0].stack + moved)
+    players[1] = players[1].with_stack(0)
+    env.state = dc_replace(env.state, players=tuple(players))
+    opened = env.start_next_hand(seed=5)
+    assert opened is not None
+    assert env.state is not None
+    assert env.state.players[1].is_eliminated
+    assert env.state.players[1].stack == 0
+    assert env.state.dealer_seat == 2
+    _call_hand_to_showdown(env)
+    assert env.state.players[1].is_eliminated
+    assert env.state.players[1].stack == 0
+    assert sum(player.stack for player in env.state.players) == 900
+
+
+def test_blinds_advance_past_half_the_buyin() -> None:
+    from poker.bots.call_bot import CallBot
+    from poker.config.blind_schedule import BlindLevel, BlindSchedule
+
+    schedule = BlindSchedule(
+        levels=[
+            BlindLevel(10, 20, 0),
+            BlindLevel(50, 100, 10),
+            BlindLevel(200, 400, 40),
+        ],
+        hands_per_level=1,
+        fixed=False,
+    )
+    env = PokerEnv(
+        num_players=2,
+        starting_stack=150,
+        learning_seat=0,
+        opponent_bots=[CallBot()],
+        seed=4,
+        blind_schedule=schedule,
+    )
+    env.reset(options={"stacks": (400, 400)})
+    assert env.config.big_blind == 20
+    _call_hand_to_showdown(env)
+    assert env.start_next_hand(seed=2) is not None
+    assert env.state is not None
+    assert env.hand_number == 1
+    assert env.config.big_blind == 100
+    assert env.state.config.big_blind == 100
+    assert env.state.config.ante == 10
+    _call_hand_to_showdown(env)
+    assert env.start_next_hand(seed=3) is not None
+    assert env.config.big_blind == 400
+    assert env.config.starting_stack == 150
+    assert env.state is not None
+    assert env.state.config.ante == 40
+    assert all(player.stack >= 0 for player in env.state.players)

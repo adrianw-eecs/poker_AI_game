@@ -28,6 +28,7 @@ from poker.engine.rules import (
     blind_seats,
     count_active_players,
     first_preflop_actor,
+    next_occupied,
     post_antes,
     post_blinds,
     reopens_betting,
@@ -48,6 +49,7 @@ from poker.ml.observation import OBS_DIM, build_observation
 from poker.ml.observation_v2 import OBS_V2_DIM, build_observation_v2
 from poker.ml.observation_v3 import OBS_V3_DIM, build_observation_v3
 from poker.ml.observation_v4 import OBS_V4_DIM, build_observation_v4
+from poker.ml.observation_v5 import OBS_V5_DIM, build_observation_v5
 from poker.ml.tendencies import TendencyTracker
 from poker.rng import RNG
 from poker.state.game_state import GameState, Street
@@ -55,8 +57,9 @@ from poker.state.player_state import PlayerState
 from poker.state.pot import Pot
 from poker.state.pot_manager import rebuild_pots, return_uncalled_bet
 
-# Training reward amplification (see docs/TRAINING.md). Validation scripts
-# convert back to bb/hand via: (reward / REWARD_SCALE) * starting_stack / big_blind.
+# Training reward amplification (see docs/TRAINING.md). The reward is
+# REWARD_SCALE times the change in winner-take-all equity (stack / chips in
+# play). bb/hand is (reward / REWARD_SCALE) * chips_in_play / big_blind.
 REWARD_SCALE = 0.5
 
 _NEXT_STREET = {
@@ -98,11 +101,20 @@ class PokerEnv(gym.Env):
         bet_scheme: BetScheme = BetScheme.LEGACY,
         dedup_mask: bool = True,
         obs_version: int = 1,
+        blind_schedule: BlindSchedule | None = None,
+        hand_cap: int = 160,
+        reward_exponent: float = 1.0,
+        tendency_half_life: float | None = None,
     ) -> None:
         if num_players < 2 or num_players > 10:
             raise ValueError(f"num_players must be in [2, 10], got {num_players}")
         if starting_stack <= 0:
             raise ValueError(f"starting_stack must be positive, got {starting_stack}")
+        if blind_schedule is not None:
+            opening_level = blind_schedule.level_for_hand(0)
+            small_blind = opening_level.small
+            big_blind = opening_level.big
+            ante = opening_level.ante
         if small_blind <= 0 or big_blind <= small_blind:
             raise ValueError("Blind amounts must be positive and ordered")
         if learning_seats is None:
@@ -125,8 +137,12 @@ class PokerEnv(gym.Env):
             )
         if rake_percent < 0 or rake_percent > 10:
             raise ValueError(f"rake_percent must be in [0, 10], got {rake_percent}")
-        if obs_version not in (1, 2, 3, 4):
-            raise ValueError(f"obs_version must be 1, 2, 3 or 4, got {obs_version}")
+        if obs_version not in (1, 2, 3, 4, 5):
+            raise ValueError(f"obs_version must be 1, 2, 3, 4 or 5, got {obs_version}")
+        if hand_cap < 1:
+            raise ValueError(f"hand_cap must be positive, got {hand_cap}")
+        if reward_exponent <= 0:
+            raise ValueError(f"reward_exponent must be positive, got {reward_exponent}")
 
         self.num_players = num_players
         self.starting_stack = starting_stack
@@ -145,10 +161,23 @@ class PokerEnv(gym.Env):
         self.bet_scheme = bet_scheme
         self.dedup_mask = dedup_mask
         self.obs_version = obs_version
-        self._obs_dim = {1: OBS_DIM, 2: OBS_V2_DIM, 3: OBS_V3_DIM, 4: OBS_V4_DIM}[obs_version]
+        self.hand_cap = hand_cap
+        self.reward_exponent = float(reward_exponent)
+        self.tendency_half_life = tendency_half_life
+        self._obs_dim = {
+            1: OBS_DIM,
+            2: OBS_V2_DIM,
+            3: OBS_V3_DIM,
+            4: OBS_V4_DIM,
+            5: OBS_V5_DIM,
+        }[obs_version]
         # v3 and v4 append rolling opponent tendencies, which persist across
         # hands within one sitting. Reset by reset_multi / start_next_hand_multi.
-        self.tendencies = TendencyTracker(num_players=num_players) if obs_version >= 3 else None
+        self.tendencies = (
+            TendencyTracker(num_players=num_players, half_life=tendency_half_life)
+            if obs_version >= 3
+            else None
+        )
 
         self.config = GameConfig(
             num_players=num_players,
@@ -158,10 +187,14 @@ class PokerEnv(gym.Env):
             ante=ante,
             rake_percent=rake_percent,
             rake_cap=rake_cap,
-            blind_schedule=BlindSchedule(
-                levels=[BlindLevel(small_blind, big_blind, ante)],
-                hands_per_level=1000,
-                fixed=True,
+            blind_schedule=(
+                blind_schedule
+                if blind_schedule is not None
+                else BlindSchedule(
+                    levels=[BlindLevel(small_blind, big_blind, ante)],
+                    hands_per_level=1000,
+                    fixed=True,
+                )
             ),
             run_it_twice=run_it_twice,
         )
@@ -178,7 +211,8 @@ class PokerEnv(gym.Env):
         self._bot_for_seat = dict(zip(opponent_seats, opponent_bots))
 
         self.action_space = spaces.Discrete(7)
-        obs_high = 52.0 if obs_version in (2, 4) else 1.0
+        # Card ids occupy 0..52. v5 keeps those slots, so the box high stays 52.
+        obs_high = 52.0 if obs_version in (2, 4, 5) else 1.0
         self.observation_space = spaces.Box(
             low=0.0, high=obs_high, shape=(self._obs_dim,), dtype=np.float32
         )
@@ -194,6 +228,7 @@ class PokerEnv(gym.Env):
         self.logger = NullLogger()
         self.current_hand_deck: Deck | None = None
         self._deck_seed_override: int | None = None
+        self._dealer_override: int | None = None
 
     def _prepare_rng(self, seed: int | None) -> None:
         if seed is not None:
@@ -224,25 +259,35 @@ class PokerEnv(gym.Env):
     ) -> tuple[int, npt.NDArray[np.float32], npt.NDArray[np.int32]] | None:
         """Deal the next hand and return ``(seat, obs, mask)`` for the next learner.
 
-        Stacks carry and the button moves one seat. Returns None when any
-        player cannot post the big blind, which ends a training sitting.
+        Stacks carry and the button moves to the next live seat. A seat with
+        no chips is eliminated and stays out. Returns None when fewer than
+        two live seats remain, which ends the sitting. A stack below the big
+        blind stays in and posts a short all-in blind.
         """
         if self.state is None:
             raise RuntimeError("Environment not initialized. Call reset() first.")
-        stacks = tuple(player.stack for player in self.state.players)
-        if len(stacks) != self.num_players or any(stack < self.big_blind for stack in stacks):
+        self._mark_busted()
+        live = [player for player in self.state.players if not player.is_eliminated]
+        if len(live) < 2:
             return None
+        previous_button = self.state.dealer_seat
+        stacks = tuple(player.stack for player in self.state.players)
+        live_mask = tuple(not player.is_eliminated for player in self.state.players)
         self.hand_number += 1
         self._prepare_rng(seed)
-        return self._begin_hand(stacks)
+        return self._begin_hand(
+            stacks,
+            live_mask=live_mask,
+            button_from=(previous_button + 1) % self.num_players,
+        )
 
     def start_next_hand(
         self, seed: int | None = None
     ) -> tuple[npt.NDArray[np.float32], dict[str, Any]] | None:
         """Deal another hand from the stacks left after the previous one.
 
-        The button moves one seat. Returns None when any player cannot post
-        the big blind, which ends a training sitting. ``seed`` redraws the deck.
+        The button moves to the next live seat. Returns None when fewer than
+        two seats still have chips. ``seed`` redraws the deck.
         """
         opened = self.start_next_hand_multi(seed)
         if opened is None:
@@ -314,31 +359,63 @@ class PokerEnv(gym.Env):
         actor = self.state.action_on_seat
         return actor, self._observe(actor), self.get_action_mask(), self._zero_rewards(), False
 
-    def _begin_hand(
-        self, stacks: tuple[int, ...] | None
-    ) -> tuple[int, npt.NDArray[np.float32], npt.NDArray[np.int32]]:
-        dealer_seat = self.hand_number % self.num_players
-        override = getattr(self, "_dealer_override", None)
-        if override is not None:
-            dealer_seat = int(override)
+    def _apply_blind_level(self) -> None:
+        """Post the schedule's blinds for ``hand_number``.
+
+        ``rules.py`` reads ``state.config`` for the blind and ante amounts, so
+        the level has to be copied onto the config. A fixed one-level schedule
+        leaves the config object unchanged.
+        """
+        level = self.config.blind_schedule.level_for_hand(self.hand_number)
+        self.blind_level = level
+        self.small_blind = level.small
+        self.big_blind = level.big
+        self.ante = level.ante
+        self.config = self.config.with_blinds(level.small, level.big, level.ante)
+
+    def _mark_busted(self) -> None:
+        """Mark every empty stack eliminated so the next hand cannot reseat it."""
+        assert self.state is not None
         players = tuple(
-            PlayerState(
-                seat=i,
-                name=f"Player{i}",
-                stack=self.starting_stack if stacks is None else stacks[i],
-                hole_cards=(),
-                committed_this_street=0,
-                committed_this_hand=0,
-                has_folded=False,
-                is_all_in=False,
-                is_eliminated=False,
-            )
-            for i in range(self.num_players)
+            player.with_stack(0).with_eliminated(True)
+            if player.stack <= 0 or player.is_eliminated
+            else player
+            for player in self.state.players
         )
+        self.state = dc_replace(self.state, players=players)
+
+    def _begin_hand(
+        self,
+        stacks: tuple[int, ...] | None,
+        live_mask: tuple[bool, ...] | None = None,
+        button_from: int | None = None,
+    ) -> tuple[int, npt.NDArray[np.float32], npt.NDArray[np.int32]]:
+        self._apply_blind_level()
+        players_list: list[PlayerState] = []
+        for seat in range(self.num_players):
+            stack = self.starting_stack if stacks is None else int(stacks[seat])
+            if live_mask is None:
+                eliminated = stack <= 0
+            else:
+                eliminated = (not live_mask[seat]) or stack <= 0
+            players_list.append(
+                PlayerState(
+                    seat=seat,
+                    name=f"Player{seat}",
+                    stack=0 if eliminated else stack,
+                    hole_cards=(),
+                    committed_this_street=0,
+                    committed_this_hand=0,
+                    has_folded=False,
+                    is_all_in=False,
+                    is_eliminated=eliminated,
+                )
+            )
+        players = tuple(players_list)
         self.state = GameState(
             hand_number=self.hand_number,
             street=Street.PREFLOP,
-            dealer_seat=dealer_seat,
+            dealer_seat=0,
             players=players,
             community_cards=(),
             pots=[Pot(0, frozenset(range(self.num_players)))],
@@ -351,6 +428,13 @@ class PokerEnv(gym.Env):
             blind_level=self.blind_level,
             action_on_seat=None,
         )
+        if self._dealer_override is not None:
+            button_start = int(self._dealer_override)
+        elif button_from is not None:
+            button_start = button_from
+        else:
+            button_start = self.hand_number % self.num_players
+        self.state = dc_replace(self.state, dealer_seat=next_occupied(self.state, button_start))
         self.player_stacks_at_hand_start = {player.seat: player.stack for player in players}
         if self.config.ante > 0:
             self.state = post_antes(self.state)
@@ -363,7 +447,7 @@ class PokerEnv(gym.Env):
         else:
             deck_seed = int(self.rng.integers(0, 2**31 - 1))
         self.current_hand_deck = Deck(rng=RNG(seed=deck_seed))
-        dealt = deal_hole_cards(self.current_hand_deck, self.state.players, dealer_seat)
+        dealt = deal_hole_cards(self.current_hand_deck, self.state.players, self.state.dealer_seat)
         actor = first_preflop_actor(self.state, sb_seat, bb_seat)
         self.state = dc_replace(
             self.state,
@@ -468,9 +552,25 @@ class PokerEnv(gym.Env):
                 continue
             assert self.state is not None and self.state.action_on_seat is not None
             seat = self.state.action_on_seat
-            if seat in self.learning_seats:
+            if seat in self.learning_seats and self._seat_can_decide(seat):
                 return False
+            if seat in self.learning_seats:
+                # A busted or all-in learner is not a decision. Skipping them
+                # here used to freeze the hand and censor the sitting.
+                self.state = advance_action(self.state, seat)
+                continue
             self._play_opponent_turn()
+
+    def _seat_can_decide(self, seat: int) -> bool:
+        """True when ``seat`` can still put chips in voluntarily."""
+        assert self.state is not None
+        player = self.state.players[seat]
+        return (
+            not player.has_folded
+            and not player.is_eliminated
+            and not player.is_all_in
+            and player.stack > 0
+        )
 
     def _stall_signature(self, seat: int) -> tuple:
         assert self.state is not None
@@ -589,19 +689,49 @@ class PokerEnv(gym.Env):
         players = []
         for seat, player in enumerate(state.players):
             award = awards.get(seat, 0)
+            new_stack = player.stack + award
             players.append(
-                player.with_stack(player.stack + award)
+                player.with_stack(max(0, new_stack))
                 .with_committed_this_street(0)
+                .with_committed_this_hand(0)
+                .with_all_in(False)
+                .with_eliminated(new_stack <= 0)
             )
         return dc_replace(state, players=tuple(players), pots=[], street=Street.SHOWDOWN, action_on_seat=None)
+
+    def _table_total(self) -> int:
+        """Chips that started the hand. Winner-take-all share uses this pool."""
+        if self.player_stacks_at_hand_start:
+            return sum(self.player_stacks_at_hand_start.values())
+        if self.state is None:
+            return 0
+        return sum(player.stack + player.committed_this_hand for player in self.state.players)
+
+    def _prize_share(self, stack: int, total: int) -> float:
+        """Stack's fraction of the chips in play. Equals P(win) under winner-take-all."""
+        if total <= 0:
+            return 0.0
+        share = max(stack, 0) / total
+        if self.reward_exponent != 1.0:
+            share = share ** self.reward_exponent
+        return share
+
+    def _prize_delta(self, seat: int) -> float:
+        """Change in winner-take-all equity across the hand, scaled for training."""
+        if self.state is None:
+            return 0.0
+        total = max(self._table_total(), 1)
+        before = self.player_stacks_at_hand_start.get(seat, 0)
+        player = self.state.players[seat]
+        after = player.stack + player.committed_this_hand
+        return REWARD_SCALE * (self._prize_share(after, total) - self._prize_share(before, total))
 
     def _terminal_rewards(self) -> dict[int, float]:
         rewards: dict[int, float] = {}
         if self.state is None:
             return rewards
         for player in self.state.players:
-            before = self.player_stacks_at_hand_start.get(player.seat, self.starting_stack)
-            rewards[player.seat] = REWARD_SCALE * float(player.stack - before) / self.starting_stack
+            rewards[player.seat] = self._prize_delta(player.seat)
         return rewards
 
     def _zero_rewards(self) -> dict[int, float]:
@@ -609,6 +739,10 @@ class PokerEnv(gym.Env):
 
     def _observe(self, seat: int) -> npt.NDArray[np.float32]:
         assert self.state is not None
+        if self.obs_version >= 5:
+            return build_observation_v5(
+                self.state, seat, self.tendencies, hand_cap=self.hand_cap
+            )
         if self.obs_version >= 4:
             return build_observation_v4(self.state, seat, self.tendencies)
         if self.obs_version == 3:
@@ -664,29 +798,31 @@ class PokerEnv(gym.Env):
             return float(np.clip(0.6 * card_strength + 0.4 * community_strength, 0.0, 1.0))
 
     def _compute_reward(self, seat: int) -> float:
-        """Stack-delta reward at showdown, plus a small equity term mid-hand."""
+        """Winner-take-all equity change, paid once when the hand ends.
+
+        Mid-hand the return is zero (obs v1 still adds a small equity term).
+        A chip won in a short-stack profile is a larger share of the pool than
+        the same chip won when the big blind is small, because the pot itself
+        is sized in blinds.
+        """
         if self.state is None:
             return 0.0
         player = self.state.players[seat]
-        stack_before = self.player_stacks_at_hand_start.get(seat, self.starting_stack)
-        stack_change = player.stack - stack_before
         active_players = count_active_players(self.state)
         is_hand_ended = active_players <= 1 or self.state.street == Street.SHOWDOWN
-        reward = 0.0
         if not is_hand_ended:
             if self.obs_version == 1:
                 try:
                     obs = build_observation(self.state, seat)
                     current_equity = self._estimate_hand_equity(obs)
-                    reward += 0.05 * (current_equity - self.prev_equity)
+                    delta = current_equity - self.prev_equity
                     self.prev_equity = current_equity
+                    return 0.05 * delta
                 except Exception:
-                    pass
-            if player.stack < 3 * self.state.config.big_blind:
-                reward -= 0.02
-            return reward
+                    return 0.0
+            return 0.0
         self.prev_equity = 0.5
-        return REWARD_SCALE * float(stack_change) / self.starting_stack
+        return self._prize_delta(seat)
 
     def _get_info(self) -> dict[str, Any]:
         if self.state is None:

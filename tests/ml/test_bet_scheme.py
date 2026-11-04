@@ -110,3 +110,57 @@ def test_pot_fraction_amounts_are_legal_and_unique() -> None:
     assert amounts
     open_to = action_index_to_action(2, state, 0, scheme=BetScheme.POT_FRACTION)
     assert open_to.amount == 50
+    amounts = []
+    for index in range(2, 7):
+        if not mask[index]:
+            continue
+        action = action_index_to_action(int(index), state, 0, scheme=BetScheme.POT_FRACTION)
+        amounts.append(action.amount)
+    assert amounts == sorted(amounts)
+
+
+def test_short_stacks_keep_fold_call_and_shove_distinct() -> None:
+    """At 5, 8 and 10 big blinds the shove stays on bucket 6."""
+    for depth in (5, 8, 10):
+        stack = depth * 20
+        state = _state(bet=20, commit=(0, 20), street=Street.PREFLOP)
+        players = []
+        for seat, player in enumerate(state.players):
+            chips = stack if seat == 0 else 1000
+            players.append(
+                PlayerState(
+                    seat=seat,
+                    name=player.name,
+                    stack=chips,
+                    hole_cards=player.hole_cards,
+                    committed_this_street=0 if seat == 0 else 20,
+                    committed_this_hand=0 if seat == 0 else 20,
+                    has_folded=False,
+                    is_all_in=False,
+                    is_eliminated=False,
+                )
+            )
+        state = GameState(
+            hand_number=0,
+            street=Street.PREFLOP,
+            dealer_seat=1,
+            players=tuple(players),
+            community_cards=(),
+            pots=[Pot(20, frozenset({0, 1}))],
+            current_bet_to_call=20,
+            last_raise_size=20,
+            action_history_this_street=[],
+            action_history_this_hand=[],
+            deck_remaining_count=48,
+            config=state.config,
+            blind_level=state.blind_level,
+            action_on_seat=0,
+        )
+        mask = build_action_mask(state, 0, scheme=BetScheme.POT_FRACTION)
+        assert mask[0] == 1 and mask[1] == 1 and mask[6] == 1
+        call = action_index_to_action(1, state, 0, scheme=BetScheme.POT_FRACTION)
+        shove = action_index_to_action(6, state, 0, scheme=BetScheme.POT_FRACTION)
+        assert call.type == ActionType.CALL
+        assert shove.type == ActionType.ALL_IN
+        assert shove.amount == stack
+        assert call.amount != shove.amount

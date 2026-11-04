@@ -15,6 +15,7 @@ from poker.ml.action_space import (
 from poker.ml.models.sdcfr_model import SDCFRModel
 from poker.ml.observation import build_observation
 from poker.ml.observation_v2 import build_observation_v2
+from poker.ml.observation_v5 import build_observation_v5
 from poker.state.game_state import GameState
 
 
@@ -57,7 +58,9 @@ class SDCFRBot:
             Sampled action from the mixed Nash strategy.
         """
         seat = self._find_seat(state)
-        if self.obs_version == 2:
+        if self.obs_version >= 5:
+            obs = build_observation_v5(state, seat)
+        elif self.obs_version == 2:
             obs = build_observation_v2(state, seat)
         else:
             obs = build_observation(state, seat)

@@ -8,6 +8,7 @@ import numpy.typing as npt
 
 from poker.domain.action import Action, ActionType
 from poker.engine.action_validator import legal_actions, validate
+from poker.engine.rules import may_raise
 from poker.ml.encoder import dequantize_raise
 from poker.state.game_state import GameState, Street
 
@@ -91,7 +92,7 @@ def capped_raise_bounds(
     Returns None when no raise fits under that ceiling.
     """
     player = state.players[seat]
-    if player.stack <= 0:
+    if player.stack <= 0 or not may_raise(state, seat):
         return None
     stack_to = player.stack + player.committed_this_street
     ceiling = stack_to if max_bet <= 0 else min(stack_to, max_bet)
@@ -163,6 +164,10 @@ def pot_fraction_raise_to(
     if bucket == 6:
         if player.stack <= 0:
             return None
+        # A shove above the current bet is a raise. It is illegal when a
+        # short all-in left betting closed. A shove that only calls stays.
+        if stack_to > state.current_bet_to_call and not may_raise(state, seat):
+            return None
         if bounds is None:
             return stack_to
         return bounds[1]
@@ -178,6 +183,11 @@ def pot_fraction_raise_to(
         call_chips = max(0, state.current_bet_to_call - player.committed_this_street)
         pot_after_call = _pot_size(state) + call_chips
         target = state.current_bet_to_call + int(round(fraction * pot_after_call))
+    # An unopened 2.5bb open must not sit above the larger pot-fraction
+    # buckets. Heads-up the 50% pot size is often only a min-raise, which
+    # made bucket 3 smaller than bucket 2.
+    if _unopened_preflop(state) and bucket < 6:
+        target = max(target, int(round(2.5 * state.config.big_blind)))
     return min(ceiling, max(min_to, target))
 
 
@@ -233,9 +243,15 @@ def _mask_pot_fraction(
     if call_actions:
         seen.add(call_actions[0].amount)
 
+    player = state.players[seat]
+    shove = player.stack + player.committed_this_street if player.stack > 0 else None
     for bucket in range(2, 7):
         amount = pot_fraction_raise_to(state, seat, bucket, max_bet=max_bet)
         if amount is None or amount in seen:
+            continue
+        # The full-stack size belongs to bucket 6. Leaving it on an earlier
+        # bucket cleared the shove index at 5-10bb, where every size clamps.
+        if bucket < 6 and shove is not None and amount >= shove:
             continue
         action = _raise_action_for_amount(state, seat, amount)
         try:
