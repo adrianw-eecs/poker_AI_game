@@ -29,35 +29,35 @@ def legal_actions(state: GameState, seat: int) -> list[Action]:
 
     player = state.players[seat]
     actions: list[Action] = []
+    to_call = state.current_bet_to_call
+    # A player who has already put in the current bet (the big blind after limps)
+    # may check. They must not be asked to call zero more chips.
+    matched = player.committed_this_street >= to_call
 
     # Fold is always available
     actions.append(Action.fold())
 
-    # No bet to call scenario (can check or open raise if player has chips)
-    if state.current_bet_to_call == 0:
-        if player.stack > 0:
-            actions.append(Action.check())
-            # Open raise must be at least big blind
-            min_open_raise = state.config.big_blind
-            max_raise_to = player.stack + player.committed_this_street
-            if max_raise_to >= min_open_raise:
-                actions.append(Action.raise_to(min(min_open_raise, max_raise_to)))
-
-    # Bet to call scenario
-    else:
-        # Call is legal if player can match the bet (possibly all-in)
-        if player.stack > 0:
-            call_amount = min(state.current_bet_to_call, player.stack + player.committed_this_street)
-            actions.append(Action.call(call_amount))
-
-            # Raise is legal only if player can meet the minimum raise requirement
+    if player.stack > 0 and matched:
+        actions.append(Action.check())
+        if to_call == 0:
+            min_raise_to = state.config.big_blind
+        else:
             min_raise_increment = max(state.config.big_blind, state.last_raise_size)
-            min_raise_to = state.current_bet_to_call + min_raise_increment
-            max_raise_to = player.stack + player.committed_this_street
+            min_raise_to = to_call + min_raise_increment
+        max_raise_to = player.stack + player.committed_this_street
+        if max_raise_to >= min_raise_to and min_raise_to > to_call:
+            actions.append(Action.raise_to(min_raise_to))
 
-            # Only add raise if it's possible to meet minimum raise (not short)
-            if max_raise_to >= min_raise_to:
-                actions.append(Action.raise_to(min(min_raise_to, max_raise_to)))
+    elif player.stack > 0:
+        # Call is the full bet, or an all-in for less when the stack is short.
+        call_amount = min(to_call, player.stack + player.committed_this_street)
+        actions.append(Action.call(call_amount))
+
+        min_raise_increment = max(state.config.big_blind, state.last_raise_size)
+        min_raise_to = to_call + min_raise_increment
+        max_raise_to = player.stack + player.committed_this_street
+        if max_raise_to >= min_raise_to:
+            actions.append(Action.raise_to(min_raise_to))
 
     # All-in is available if player has chips and it's not already an available action
     if player.stack > 0:
@@ -90,22 +90,26 @@ def validate(state: GameState, seat: int, action: Action) -> None:
     if action.type == ActionType.FOLD:
         return
 
-    # Check is legal only if no bet to call
+    # Check is legal when this player has already matched the current bet.
     if action.type == ActionType.CHECK:
-        if state.current_bet_to_call != 0:
+        if player.committed_this_street < state.current_bet_to_call:
             raise IllegalActionError("Cannot check when facing a bet")
         return
 
-    # Call is legal only if there's a bet to call
+    # Call is legal only if there's a bet this player has not matched.
+    # The amount is the total street commitment: the full bet, or all-in if short.
     if action.type == ActionType.CALL:
         if state.current_bet_to_call == 0:
             raise IllegalActionError("Cannot call when there's no bet")
-        # Call amount must be at least the minimum (either the full bet or all remaining chips)
-        min_call_amount = min(state.current_bet_to_call, player.stack)
-        max_call_amount = player.stack + player.committed_this_street
-        if action.amount < min_call_amount or action.amount > max_call_amount:
+        if player.committed_this_street >= state.current_bet_to_call:
+            raise IllegalActionError("Cannot call when the bet is already matched")
+        legal_call = min(
+            state.current_bet_to_call,
+            player.stack + player.committed_this_street,
+        )
+        if action.amount != legal_call:
             raise IllegalActionError(
-                f"Call amount {action.amount} is invalid. Must be between {min_call_amount} and {max_call_amount}"
+                f"Call amount {action.amount} is invalid. Must call {legal_call}"
             )
         return
 

@@ -92,6 +92,11 @@ class Card:
         """Return the suit."""
         return self._suit
 
+    def code(self) -> str:
+        """Return a two-character code such as 'As' or 'Td' with no color codes."""
+        suit_letter = "cdhs"[self.suit.value]
+        return f"{self.rank}{suit_letter}"
+
     def __str__(self) -> str:
         """Return colored string representation like 'A♠' or '2♦' with ANSI color codes."""
         return _colorize_card(str(self.rank), self.suit)

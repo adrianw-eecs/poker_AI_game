@@ -47,6 +47,20 @@ def test_fold_always_legal() -> None:
     assert ActionType.FOLD in types
 
 
+def test_big_blind_can_check_when_limped_to() -> None:
+    """A player who has already matched the bet checks. They do not call zero."""
+    state = _state(
+        [_player(0, 980, committed=20), _player(1, 990, committed=10)],
+        action_on=0,
+        bet=20,
+        last_raise=20,
+    )
+    types = [a.type for a in legal_actions(state, 0)]
+    assert ActionType.CHECK in types
+    assert ActionType.CALL not in types
+    validate(state, 0, Action.check())
+
+
 def test_check_only_without_bet() -> None:
     state_no_bet = _state([_player(0, 1000), _player(1, 1000)], action_on=0, bet=0)
     assert ActionType.CHECK in [a.type for a in legal_actions(state_no_bet, 0)]

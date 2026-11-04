@@ -1,6 +1,7 @@
 """Human player adapter implementing the Bot protocol."""
 
 import poker.interface.text_ui as text_ui
+from poker.bots.progress import ensure_progressing_action
 from poker.domain.action import Action
 from poker.state.game_state import GameState
 
@@ -40,7 +41,7 @@ class HumanBot:
             The action chosen by the human.
         """
         print(text_ui.render(state, self._seat))
-        return text_ui.prompt(state, legal)
+        return ensure_progressing_action(state, text_ui.prompt(state, legal), legal)
 
     def observe_result(self, final_state: GameState, reward: float) -> None:
         """Observe the hand outcome (silent for human players).

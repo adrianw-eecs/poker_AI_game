@@ -6,7 +6,9 @@ from poker.config.blind_schedule import BlindLevel, BlindSchedule
 from poker.config.game_config import GameConfig
 from poker.domain.action import Action
 from poker.domain.card import Card, Rank, Suit
+from poker.engine.action_validator import validate
 from poker.engine.betting_round import BettingRound
+from poker.exceptions import IllegalActionError
 from poker.logging.logger import NullLogger
 from poker.state.game_state import GameState, Street
 from poker.state.player_state import PlayerState
@@ -209,3 +211,62 @@ def test_hand_47_scenario_no_double_action_after_all_in() -> None:
     assert p1_action_count[0] == 0, \
         f"Player 1 should not act when only player who can act after all go all-in, but acted {p1_action_count[0]} times"
     assert final.action_on_seat is None, "Betting round should be closed"
+
+
+def test_last_player_facing_bet_must_act() -> None:
+    """Two all-ins do not close the street while a third player still owes a call."""
+    players = [
+        _player(0, 0, committed=100, all_in=True),
+        _player(1, 0, committed=80, all_in=True),
+        _player(2, 500, committed=0),
+    ]
+    state = _state(players, action_on=2, bet=100)
+    acted: list[int] = []
+
+    def get_action(seat, _s):
+        acted.append(seat)
+        return Action.fold()
+
+    final = BettingRound(state, get_action, NullLogger()).run()
+    assert acted == [2]
+    assert final.players[2].has_folded
+    assert final.action_on_seat is None
+
+
+def test_unmatched_bet_is_returned() -> None:
+    state = _state([_player(0, 1000), _player(1, 1000)], action_on=0, bet=0)
+
+    def get_action(seat, _s):
+        if seat == 0:
+            return Action.raise_to(20)
+        return Action.fold()
+
+    final = BettingRound(state, get_action, NullLogger()).run()
+    assert final.players[0].stack == 1000
+    assert final.players[0].committed_this_hand == 0
+    assert sum(pot.amount for pot in final.pots) == 0
+
+
+def test_short_all_in_keeps_minimum_raise() -> None:
+    players = [
+        _player(0, 2000, committed=492),
+        _player(1, 187, committed=492),
+    ]
+    state = _state(players, action_on=1, bet=492, last_raise=231)
+
+    def get_action(seat, _s):
+        if seat == 1:
+            return Action.all_in(679)
+        return Action.fold()
+
+    final = BettingRound(state, get_action, NullLogger()).run()
+    assert final.last_raise_size == 231
+
+    facing = _state(
+        [_player(0, 2000, committed=492), _player(1, 5000, committed=840)],
+        action_on=1,
+        bet=840,
+        last_raise=231,
+    )
+    with pytest.raises(IllegalActionError):
+        validate(facing, 1, Action.raise_to(1001))

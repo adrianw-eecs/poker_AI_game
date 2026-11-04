@@ -2,9 +2,11 @@
 
 from collections.abc import Sequence
 
+import numpy as np
+
 from poker.domain.card import Card
-from poker.domain.deck import Deck
 from poker.evaluation.evaluator import evaluate
+from poker.evaluation.fast_evaluator import card_index, score_hands
 from poker.rng import RNG
 
 
@@ -17,15 +19,20 @@ def monte_carlo_equity(
 ) -> float:
     """Estimate win probability via Monte Carlo simulation.
 
+    The remaining deck is built once. Every trial's cards are drawn together
+    as one index array, and hands are scored with the rank-multiset lookup
+    rather than ``evaluate``. Chops count as ``1 / (partners + 1)``.
+
     Args:
         hole: Player's 2 hole cards.
         board: Community cards (0-5 cards).
         num_opponents: Number of opponents with unknown cards.
         num_trials: Number of simulations to run.
-        rng: Seeded RNG for reproducibility.
+        rng: Seeded RNG for reproducibility. ``rng.seed`` selects the numpy
+            stream. An unseeded RNG contributes one ``randint`` draw.
 
     Returns:
-        Win probability in [0, 1]. Chops are counted as 0.5 (shared win).
+        Win probability in [0, 1].
     """
     if len(hole) != 2:
         raise ValueError(f"Expected 2 hole cards, got {len(hole)}")
@@ -36,48 +43,59 @@ def monte_carlo_equity(
     if num_trials < 1:
         raise ValueError(f"Must run at least 1 trial, got {num_trials}")
 
-    known_cards = set(hole) | set(board)
-    wins = 0.0
+    hole_ids = np.asarray([card_index(card) for card in hole], dtype=np.int16)
+    board_ids = np.asarray([card_index(card) for card in board], dtype=np.int16)
+    known = set(int(card_id) for card_id in hole_ids)
+    known.update(int(card_id) for card_id in board_ids)
+    remaining = np.asarray(
+        [card_id for card_id in range(52) if card_id not in known], dtype=np.int16
+    )
 
-    for _ in range(num_trials):
-        # Create a deck excluding known cards
-        full_deck = Deck(rng)
-        remaining = [card for card in full_deck._create_deck() if card not in known_cards]
+    board_need = 5 - int(board_ids.shape[0])
+    per_trial = board_need + 2 * num_opponents
+    if per_trial > int(remaining.shape[0]):
+        raise ValueError(
+            f"Need {per_trial} cards but only {int(remaining.shape[0])} remain"
+        )
 
-        # Shuffle remaining cards
-        rng.shuffle(remaining)
+    seed = rng.seed if rng.seed is not None else rng.randint(0, 2**31 - 1)
+    generator = np.random.default_rng(seed)
+    keys = generator.random((num_trials, int(remaining.shape[0])))
+    # Prefix of a random permutation: a uniform sample without replacement.
+    order = np.argsort(keys, axis=1)[:, :per_trial]
+    drawn = remaining[order]
 
-        # Deal remaining board cards to complete to 5
-        cards_needed = 5 - len(board)
-        final_board = list(board) + remaining[:cards_needed]
-        idx = cards_needed
+    full_board = np.empty((num_trials, 5), dtype=np.int16)
+    n_board = int(board_ids.shape[0])
+    if n_board:
+        full_board[:, :n_board] = board_ids
+    if board_need:
+        full_board[:, n_board:] = drawn[:, :board_need]
 
-        # Deal opponent hole cards
-        opponent_hole_cards = []
-        for _ in range(num_opponents):
-            opponent_hole_cards.append([remaining[idx], remaining[idx + 1]])
-            idx += 2
+    hero = np.empty((num_trials, 7), dtype=np.int16)
+    hero[:, 0:2] = hole_ids
+    hero[:, 2:] = full_board
+    hero_scores = score_hands(hero)
 
-        # Evaluate all hands
-        our_hand = evaluate(list(hole) + final_board)
-        opponent_hands = [
-            evaluate(opp_hole + final_board)
-            for opp_hole in opponent_hole_cards
-        ]
+    better = np.zeros(num_trials, dtype=np.int32)
+    equal = np.zeros(num_trials, dtype=np.int32)
+    opp = np.empty((num_trials, 7), dtype=np.int16)
+    opp[:, 2:] = full_board
+    offset = board_need
+    for _ in range(num_opponents):
+        opp[:, 0:2] = drawn[:, offset : offset + 2]
+        offset += 2
+        opp_scores = score_hands(opp)
+        better += opp_scores > hero_scores
+        equal += opp_scores == hero_scores
 
-        # Count wins (chops)
-        better_opponents = sum(1 for opp_hand in opponent_hands if opp_hand > our_hand)
-        equal_opponents = sum(1 for opp_hand in opponent_hands if opp_hand == our_hand)
-
-        if better_opponents == 0:
-            # We win or chop
-            if equal_opponents == 0:
-                wins += 1.0
-            else:
-                # We chop with equal_opponents + ourselves
-                wins += 1.0 / (equal_opponents + 1)
-
-    return wins / num_trials
+    share = np.zeros(num_trials, dtype=np.float64)
+    no_better = better == 0
+    pure = no_better & (equal == 0)
+    chop = no_better & (equal > 0)
+    share[pure] = 1.0
+    share[chop] = 1.0 / (equal[chop].astype(np.float64) + 1.0)
+    return float(share.mean())
 
 
 def exact_equity_river(

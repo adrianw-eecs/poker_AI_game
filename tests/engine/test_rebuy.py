@@ -182,3 +182,52 @@ def test_custom_rebuy_stack():
     # Verify custom rebuy_stack used
     assert state_after.players[1].stack == 200  # custom rebuy_stack
     assert not state_after.players[1].is_eliminated
+
+
+def test_rebuy_is_not_chip_creation():
+    """Rebuy chips are allowed. Chips beyond rebuys still raise."""
+    sched = BlindSchedule(
+        levels=[BlindLevel(small=5, big=10)],
+        hands_per_level=100,
+        fixed=True,
+    )
+    config = GameConfig(
+        num_players=2,
+        starting_stack=100,
+        small_blind=5,
+        big_blind=10,
+        ante=0,
+        rake_percent=0.0,
+        rake_cap=None,
+        blind_schedule=sched,
+    )
+    session = Session(
+        config=config,
+        blind_schedule=sched,
+        session_config=SessionConfig(duration_hands=None, rebuy_enabled=True),
+        logger=NullLogger(),
+    )
+    state = session.create_initial_state(2)
+    initial = sum(player.stack for player in state.players)
+    # The busted player's chips are already in the winner's stack.
+    transferred = replace(
+        state,
+        players=(
+            replace(state.players[0], stack=initial),
+            replace(state.players[1], stack=0, is_eliminated=True),
+        ),
+    )
+    session._verify_chip_conservation(transferred, initial)
+
+    rebought = session._apply_rebuys(transferred)
+    session._verify_chip_conservation(rebought, initial)
+
+    inflated = replace(
+        rebought,
+        players=(
+            replace(rebought.players[0], stack=rebought.players[0].stack + 50),
+            rebought.players[1],
+        ),
+    )
+    with pytest.raises(AssertionError, match="Chip creation detected"):
+        session._verify_chip_conservation(inflated, initial)

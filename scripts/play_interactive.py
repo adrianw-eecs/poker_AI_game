@@ -5,7 +5,7 @@ import sys
 import re
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 from poker.ml.env import PokerEnv
@@ -61,17 +61,19 @@ class NFSPBot(Bot):
 
 
 class InteractivePokerGame:
-    """Interactive 4-player poker game with human player."""
+    """Interactive poker game with human player vs NFSP and bots."""
 
-    def __init__(self, model_path: str, num_hands: int = 3):
+    def __init__(self, model_path: str, num_hands: int = 3, num_players: int = 4):
         """Initialize the game.
 
         Args:
             model_path: Path to trained NFSP model checkpoint
             num_hands: Number of hands to play
+            num_players: Total number of players (default 4, supports 2-9)
         """
         self.model_path = model_path
         self.num_hands = num_hands
+        self.num_players = num_players
         self.hands_played = 0
         self.cumulative_profit = 0.0
 
@@ -81,15 +83,21 @@ class InteractivePokerGame:
         nfsp_model.load(model_path)
         print(f"[OK] Model loaded from {model_path}\n")
 
+        # Build opponent list (num_players - 1 opponents, human is at seat 0)
+        opponents = [NFSPBot(nfsp_model)]  # Seat 1: NFSP Model
+
+        # Add remaining bots (RandomBot and FlopBot alternating)
+        for i in range(num_players - 2):
+            if i % 2 == 0:
+                opponents.append(RandomBot(seed=None))
+            else:
+                opponents.append(FlopBot(seed=None))
+
         # Create environment with human at seat 0
         self.env = PokerEnv(
-            num_players=4,
+            num_players=num_players,
             learning_seat=0,  # Human is at seat 0
-            opponent_bots=[
-                NFSPBot(nfsp_model),  # Seat 1: NFSP Model
-                RandomBot(seed=None),  # Seat 2: RandomBot
-                FlopBot(seed=None),  # Seat 3: FlopBot
-            ],
+            opponent_bots=opponents,
             small_blind=25,
             big_blind=50,
             starting_stack=1000,
@@ -98,13 +106,15 @@ class InteractivePokerGame:
 
     def get_player_name(self, seat: int) -> str:
         """Get friendly name for a player seat."""
-        names = {
-            0: "YOU (Human)",
-            1: "NFSP Model",
-            2: "RandomBot",
-            3: "FlopBot",
-        }
-        return names.get(seat, f"Player {seat}")
+        if seat == 0:
+            return "YOU (Human)"
+        elif seat == 1:
+            return "NFSP Model"
+        else:
+            # Alternate between RandomBot and FlopBot for remaining seats
+            bot_idx = seat - 2
+            bot_type = "RandomBot" if bot_idx % 2 == 0 else "FlopBot"
+            return f"{bot_type} {bot_idx + 1}"
 
     def cards_to_string(self, cards) -> str:
         """Convert card objects to readable string with suit symbols."""
@@ -304,11 +314,17 @@ def main():
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Play interactive poker vs trained model")
+    parser = argparse.ArgumentParser(description="Play interactive poker vs trained NFSP model and bots")
     parser.add_argument("model_path", help="Path to trained NFSP model checkpoint (.pt file)")
     parser.add_argument("--hands", type=int, default=3, help="Number of hands to play (default: 3)")
+    parser.add_argument("--players", type=int, default=4, help="Number of players (2-9, default: 4). Human + NFSP + (players-2) bots")
 
     args = parser.parse_args()
+
+    # Validate player count
+    if not (2 <= args.players <= 9):
+        print("[ERROR] Player count must be between 2 and 9")
+        sys.exit(1)
 
     # Verify model exists
     model_path = Path(args.model_path)
@@ -317,7 +333,7 @@ def main():
         sys.exit(1)
 
     # Run game
-    game = InteractivePokerGame(str(model_path), num_hands=args.hands)
+    game = InteractivePokerGame(str(model_path), num_hands=args.hands, num_players=args.players)
     game.run()
 
 

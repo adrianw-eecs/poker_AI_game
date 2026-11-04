@@ -21,19 +21,17 @@ The engine always calls bots with `state.view_for(seat)` so **opponent hole card
 
 ## Using bots from the CLI
 
-Examples:
+`--bots` takes one token per seat. Count must match `--num-players` (2–9). Model seats need a checkpoint. The same path is loaded once if several seats name it.
 
 ```bash
-python -m poker.main -n 2 -b human random
-python -m poker.main -n 3 -b flop_bot random random
+python -m poker.main -n 6 --hands 20 --seed 1 --bots human nfsp:models/nfsp_v2/nfsp_v2.pt sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt random random flop
 ```
 
-`--bots` takes one token per seat, in seat order. Unspecified seats default to `random`.
+Tokens: `human`, `random`, `flop`, `nfsp:PATH`, `sdcfr:PATH`, `nn:PATH` (not implemented yet).
+
+Current checkpoints: NFSP `models/nfsp_v2/nfsp_v2.pt` (obs v2, 318-wide), SD-CFR `models/sdcfr_prod/sdcfr_ckpt_500.pt` (obs v1, 98-wide). These are the only two checkpoints kept in the repo.
 
 ## Adding a new bot
 
-Create a new file under `src/poker/bots/` that provides the protocol surface above.
-For quick iteration, copy `random_bot.py` and replace `act()`.
-
-If you want it selectable from the CLI, add it to the mapping in `poker.main` where bots are constructed.
+Create a file under `poker/bots/` with `name`, `act`, and `observe_result`. Copy `random_bot.py` and replace `act()`. Register the token in `poker.main` where seats are built.
 

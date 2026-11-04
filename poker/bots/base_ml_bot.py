@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from poker.bots.progress import ensure_progressing_action
 from poker.domain.action import Action
 from poker.ml.action_space import action_index_to_action, action_to_action_index
 from poker.ml.features.handcrafted import extract_handcrafted_features
@@ -114,7 +115,8 @@ class BaseMLBot:
         best_action_idx = self.model.predict_best_action(features, mask)
 
         # Convert back to concrete action
-        return action_index_to_action(best_action_idx, state, seat)
+        chosen = action_index_to_action(best_action_idx, state, seat)
+        return ensure_progressing_action(state, chosen, legal)
 
     def observe_result(self, final_state: GameState, reward: float) -> None:
         """Observe the hand outcome.

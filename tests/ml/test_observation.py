@@ -68,10 +68,10 @@ def test_observation_shape(config_3p: GameConfig) -> None:
     players = [_player(i) for i in range(3)]
     state = _state(config_3p, players)
     obs = build_observation(state, seat=0)
-    assert obs.shape == (155,)
+    assert obs.shape == (98,)
     assert obs.dtype == np.float32
     shape, dtype = observation_spec()
-    assert shape == (155,)
+    assert shape == (98,)
     assert dtype == "float32"
 
 
@@ -81,6 +81,26 @@ def test_observation_normalization(config_3p: GameConfig) -> None:
     obs = build_observation(state, seat=0)
     assert (obs >= -0.1).all()
     assert (obs <= 1.1).all()
+
+
+def test_heads_up_button_is_the_small_blind(config_3p: GameConfig) -> None:
+    """Heads-up, the dealer posts the small blind and the other seat the big blind."""
+    config = GameConfig(
+        num_players=2,
+        starting_stack=1000,
+        small_blind=10,
+        big_blind=20,
+        ante=0,
+        rake_percent=0,
+        rake_cap=None,
+        blind_schedule=config_3p.blind_schedule,
+        run_it_twice=False,
+    )
+    state = _state(config, [_player(0), _player(1)])
+    obs = build_observation(state, seat=0)
+    # Seat flags start at index 25: is_self, button, sb, bb.
+    assert obs[25:29].tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert obs[29:33].tolist() == [0.0, 0.0, 0.0, 1.0]
 
 
 def test_observation_6_player() -> None:
@@ -102,6 +122,6 @@ def test_observation_6_player() -> None:
     players = [_player(i) for i in range(6)]
     state = _state(config, players)
     obs = build_observation(state, seat=0)
-    assert obs.shape == (155,)
+    assert obs.shape == (98,)
     assert (obs >= -0.1).all()
     assert (obs <= 1.1).all()

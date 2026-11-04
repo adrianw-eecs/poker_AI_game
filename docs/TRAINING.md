@@ -1,276 +1,289 @@
 # ML Training Guide
 
-Comprehensive guide for training NFSP and SD-CFR poker AI models.
+How to train and evaluate the NFSP and SD-CFR models.
+
+---
+
+## Current Checkpoints (verified 2026-11-03)
+
+| Role | Path | Obs | Encoder |
+|---|---|---|---|
+| NFSP | `models/nfsp_v2/nfsp_v2.pt` | v2, 318-wide | `PokerNetV2` |
+| SD-CFR | `models/sdcfr_prod/sdcfr_ckpt_500.pt` | v1, 98-wide | `PokerNetwork` |
+
+There is no v3 checkpoint. The old `nfsp_v3*.pt` files were deleted — they used the
+retired 155-wide observation and predate the current architecture. "v3" refers to the
+reward-design iteration described below, not a model version.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 4-player self-play training (most advanced, recommended)
-python scripts/train_nfsp_selfplay.py --episodes 250000
+# Continue NFSP v2 training from the current checkpoint
+python scripts/train_nfsp_v2.py --checkpoint models/nfsp_v2/nfsp_v2.pt
 
-# 2-player production training with full logging
-python scripts/train_nfsp_production.py --episodes 250000
+# Train SD-CFR
+python scripts/train_sdcfr_selfplay.py
 
-# SD-CFR extended training (~8 hours for 10K iterations)
-python scripts/train_sdcfr_extended.py --cfr-iterations 10000
+# Score a mixed table
+python scripts/validate_training.py --hands 200 --seed 1 \
+  --bots nfsp:models/nfsp_v2/nfsp_v2.pt \
+         sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt random flop
+```
 
-# SD-CFR standard training
-python scripts/train_sdcfr.py --cfr-iterations 5000
+NFSP v1 (98-wide, one learning seat) is still available via
+`scripts/train_nfsp_selfplay.py`. SD-CFR seats stay on the legacy 98-d encoder and
+`BetScheme.LEGACY` — migrating them to v2 is the prerequisite for the hybrid work
+in [`HYBRID_PLAN.md`](HYBRID_PLAN.md).
 
-# Validate a checkpoint or final model
-python scripts/validate_training.py models/nfsp_4player.pt --hands 200
+```bash
+python scripts/profile_training.py --v2 --episodes 100
 ```
 
 ---
 
-## Models Overview
+## Long-Form NFSP Training
 
-### NFSP (Neural Fictitious Self-Play)
-- Two-network architecture: Q-network (DQN) + Policy network (behavioral cloning)
-- Mixes best-response (15%) with average policy (85%)
-- **Training script**: `scripts/train_nfsp_v3.py` (sequential) or `scripts/train_nfsp_parallel.py` (parallel)
-- **Architecture**: Deep residual network, 4 blocks, 350K parameters
+`train_nfsp_v2.py` is the current trainer. Defaults are already tuned for a long
+run, so the minimal long-form invocation is small.
 
-### SD-CFR (Single Deep Counterfactual Regret Minimization)
-- Advantage network learns counterfactual regret
-- Reservoir buffer collects 1M+ samples before full convergence
-- **Training script**: `scripts/train_sdcfr.py`
-- **Architecture**: `src/poker/ml/models/sdcfr_model.py`
+### Resume a long run (recommended)
+
+Resuming from the current checkpoint preserves buffers, optimizer state, epsilon
+position, and self-play schedule:
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --checkpoint models/nfsp_v2/nfsp_v2.pt \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 200000 \
+  --eval-every 5000 \
+  --checkpoint-every 10000 \
+  --model-name nfsp_v2
+```
+
+### Fresh long run into a new folder
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 500000 \
+  --eval-every 10000 \
+  --checkpoint-every 25000 \
+  --min-players 2 --max-players 9 \
+  --batch-size 2048 \
+  --train-every 64 \
+  --updates-per-train 2 \
+  --eta 0.1 \
+  --random-eval-hands 100 \
+  --stop-min-episode 50000 \
+  --stop-patience 15 \
+  --model-name nfsp_long
+```
+
+### Unattended overnight run
+
+Higher patience, fewer evaluations, and no early stop surprise. Validation is the
+slowest part of the loop, so evaluating less often is what buys wall-clock time:
+
+```bash
+python scripts/train_nfsp_v2.py \
+  --checkpoint models/nfsp_v2/nfsp_v2.pt \
+  --sdcfr-opponent models/sdcfr_prod/sdcfr_ckpt_500.pt \
+  --episodes 1000000 \
+  --eval-every 25000 \
+  --checkpoint-every 50000 \
+  --stop-patience 40 \
+  --stop-min-episode 100000 \
+  --random-eval-hands 50 \
+  --sdcfr-eval-only \
+  --model-name nfsp_overnight
+```
+
+### Parameter reference
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--episodes` | 100000 | Episodes, not hands. ~10 hands/episode |
+| `--eval-every` | 5000 | Validation is the main non-training cost; raise it for long runs |
+| `--checkpoint-every` | 10000 | Writes `nfsp_gen_N.pt`; these are ~150 MB each |
+| `--batch-size` | 2048 | Gradient batch |
+| `--train-every` | 64 | Decisions between training steps |
+| `--updates-per-train` | 1 | Raise to 2–4 to increase replay ratio |
+| `--eta` | 0.1 | Best-response mix; 0.1 is the paper-faithful value |
+| `--min-players` / `--max-players` | 2 / 9 | 6-player is weighted 2× |
+| `--stop-min-episode` | 20000 | Earliest stall stop |
+| `--stop-patience` | 10 | Evals without improvement before stopping |
+| `--random-eval-hands` | 100 | Hands per player count for Random+Flop eval |
+| `--sdcfr-eval-only` | off | Skips Random+Flop eval, roughly halves eval time |
+| `--model-name` | `nfsp_v2` | Output folder `models/<name>/` |
+| `--no-validation` | off | Disables evaluation entirely (throughput testing only) |
+
+### Outputs
+
+For `--model-name nfsp_v2`:
+
+- `models/nfsp_v2/nfsp_v2.pt` — final / best checkpoint
+- `models/nfsp_v2/nfsp_best.pt` — best SD-CFR lower bound so far
+- `models/nfsp_v2/nfsp_gen_N.pt` — periodic generations
+- `models/nfsp_v2/eval_history.csv` — per-eval metrics
+
+### Monitoring
+
+```bash
+# Live loss / eval lines
+Get-Content models/nfsp_v2/training_v2.txt -Wait -Tail 20
+
+# Best BB/100 trend
+Get-Content models/nfsp_v2/eval_history.csv | Select-Object -First 1
+Get-Content models/nfsp_v2/eval_history.csv | Select-Object -Last 10
+```
+
+The honest health check is `br_proxy_bb100` in `eval_history.csv`. A rising mean
+with a wildly oscillating proxy means the best response is not converging, even if
+the average policy is improving.
 
 ---
 
-## Reward Design (v3 — Current)
+## Reward Design
 
-### The Problem (v1/v2)
+### The problem (v1/v2)
 
-Early training attempts used an artificial anti-folding bonus:
+Early runs added an artificial anti-folding bonus:
 
 ```python
-# v1/v2 (broken):
 if action == FOLD:
     reward -= 0.01
 else:
     reward += 0.005
 ```
 
-This mathematically incentivized always folding:
-- Playing a -0.05 EV hand: `-0.05 + 0.005 = -0.045`
-- Folding: `-0.01`
-- Decision: **Fold is always optimal**
+This mathematically incentivised always folding. Playing a −0.05 EV hand gives
+`−0.05 + 0.005 = −0.045`, while folding gives `−0.01`, so folding is always
+optimal. Models converged to a 100% fold rate.
 
-Result: Models converged to 100% fold rate.
+### The fix (v3)
 
-### The Fix (v3 — Pure Game Rewards)
-
-Remove artificial bonuses. Use 10x-scaled pure game rewards:
+Remove the bonuses and use pure game rewards scaled by `REWARD_SCALE`:
 
 ```python
-# v3 (working):
-reward = 10.0 * (stack_change / starting_stack)
-# No artificial FOLD penalty or PLAY bonus
+# poker/ml/env.py
+REWARD_SCALE = 0.5
+reward = REWARD_SCALE * (stack_change / starting_stack)
 ```
 
-Why 10x scaling? Tested empirically:
-- 5x: Q-loss too high, network struggles
-- **10x: Optimal, clean convergence**
-- 50x: Gradient explosion (Q-loss explodes to 600+)
-
-The game structure creates natural incentives:
-- Strong hands → win pot → large positive reward → learn to play
-- Weak hands → lose chips → large negative reward → learn to fold
-- Natural equilibrium: ~30% fold, balanced strategy
-
-### Diverse Opponent Training
-
-Train against a rotating mix of opponents for diverse learning:
-- **RandomBot**: Teaches exploiting chaotic play
-- **FlopBot**: Teaches hand-strength awareness
-- **CallBot** (`src/poker/bots/call_bot.py`): Teaches value betting vs calling stations
+Larger scales were tested and rejected: 50× exploded Q-loss past 600, while 1× gave
+too weak a signal to learn from.
 
 ---
 
 ## Training Phases
 
-### Phase 1: Quick Test (~30 min)
-
-Validate implementation before committing to full training.
+### Phase 1 — quick test
 
 ```bash
-# NFSP quick test (5K episodes)
-python scripts/train_nfsp_selfplay.py --episodes 5000 --eval-every 500
-
-# SD-CFR quick test (200 iterations)
+python scripts/train_nfsp_v2.py --episodes 200 --eval-every 100 --no-validation
 python scripts/train_sdcfr.py --cfr-iterations 200 --traversals-per-iteration 500
 ```
 
-### Phase 2: Medium Training (2–6 hours)
+### Phase 2 — medium
 
 ```bash
-# NFSP: 100K episodes (~2 hours on RTX 3060)
-python scripts/train_nfsp_selfplay.py --episodes 100000 --eval-every 5000
-
-# SD-CFR: 2000 iterations (~4 hours on RTX 3060)
+python scripts/train_nfsp_v2.py --episodes 20000 --eval-every 2000
 python scripts/train_sdcfr.py --cfr-iterations 2000
 ```
 
-### Phase 3: Full Training (8–20 hours)
+### Phase 3 — full
 
 ```bash
-# NFSP: 250K episodes (self-play, recommended)
-python scripts/train_nfsp_selfplay.py --episodes 250000 --eval-every 10000
-
-# NFSP: 250K episodes (2-player production with logging)
-python scripts/train_nfsp_production.py --episodes 250000
-
-# SD-CFR: 10K iterations (~8 hours on RTX 3060)
+python scripts/train_nfsp_v2.py --episodes 100000 --eval-every 5000
 python scripts/train_sdcfr_extended.py --cfr-iterations 10000 --traversals-per-iteration 1000
 ```
 
 ---
 
-## Expected Training Curves
+## Monitoring
 
-### NFSP v3 (250K episodes)
-
-| Episode | Q-Loss | Policy-Loss | Eval Reward | FOLD% |
-|---------|--------|-------------|-------------|-------|
-| 0       | 20.0   | 1.5         | -2.0        | 100%  |
-| 10K     | 8.5    | 1.2         | -1.2        | 85%   |
-| 50K     | 4.8    | 1.1         | -0.3        | 45%   |
-| 100K    | 3.2    | 1.0         | +0.05       | 35%   |
-| 250K    | 1.8    | 0.95        | +0.22       | 28%   |
-
-### SD-CFR (10K iterations)
-
-| Iteration | Loss | Buffer Size | Status    |
-|-----------|------|-------------|-----------|
-| 0         | -1.0 | 0           | Collecting |
-| 500       | 28.5 | 50K         | Training   |
-| 2000      | 12.1 | 200K        | Improving  |
-| 10000     | 3.2  | 1M+         | Final      |
-
-### Performance Targets
-
-| Model  | Quick (10K) | Medium (100K) | Full (250K+) |
-|--------|-------------|---------------|--------------|
-| NFSP   | -20% to 0%  | -5% to +5%    | +15–25% EV   |
-| SD-CFR | -80% to -50%| -30% to -10%  | +10–20% EV   |
-
----
-
-## Parallel Training Architecture
-
-`scripts/train_nfsp_parallel.py` achieves 3–4x wall-clock speedup via multiprocessing:
+Progress prints every `--eval-every` episodes:
 
 ```
-Worker 0 ─┐
-Worker 1 ─┤─→ Transition Queue ─→ Main Process ─→ Buffers ─→ Training
-Worker 2 ─┤                                           ↑
-Worker 3 ─┘                              Weight sync every 1000 eps
+Ep 50000 | hands=... | random=+341.8 | sp=0%
+  [EVAL] SD-CFR: -209.1 BB/100 (lower -370.1)
+  [RAMP] self-play 0% -> 10%
 ```
 
-**Key design decisions:**
-- Queue-based (not shared-buffer) to avoid pickle issues with threading.Lock
-- Main process is sole writer to buffers — no locking needed during training
-- Weight sync every 1000 episodes (~0.4% of training, acceptable staleness)
-- Workers block on put() if queue depth exceeds 10,000 (backpressure)
+### Key metrics
 
-**Performance:**
+| Metric | Target | Warning sign |
+|---|---|---|
+| `q_loss` | < 5.0 | > 10 sustained |
+| `policy_loss` | 1.0–1.5 | > 2.0 (diverging) |
+| `sdcfr_bb100` | trending up | falling while `q_loss` falls |
+| `br_proxy_bb100` | **stable** | swinging ±400 (best response not converging) |
 
-| Metric            | Sequential (v3) | Parallel       | Speedup |
-|-------------------|-----------------|----------------|---------|
-| 250K episode time | ~13 min         | ~3.5–4 min     | 3–3.7×  |
-| CPU utilization   | 1 core          | 4 cores        | 4×      |
-| Memory usage      | ~2 GB           | ~8 GB          | 4×      |
-| GPU utilization   | 3–7%            | Same           | No change|
-
-**Thread-safe buffers** (`src/poker/ml/buffers.py`): All three buffer classes (CircularBuffer, ReservoirBuffer, WeightedReservoirBuffer) have `threading.Lock()` protecting all public methods.
-
----
-
-## Monitoring During Training
-
-### Automatic (logged every `--eval-every` episodes)
-
-```
-Ep  50000/250000 | q_loss=4.5810 | policy_loss=1.1234 | eval=-0.2105 | elapsed=1842s | ETA=1658m
-```
-
-### Manual Checkpoint Validation
-
-```bash
-python scripts/validate_training.py models/nfsp_v3_ckpt_050000.pt --hands 100
-```
-
-Expected output:
-```
-Performance vs Opponents:
-  RandomBot    :  -0.0524 reward/hand  ~ NEUTRAL
-  CallBot      :   0.1234 reward/hand  ✓ POSITIVE
-  FlopBot      :  -0.0891 reward/hand  ~ NEUTRAL
-
-Action Distribution:
-  FOLD:  45%   CHECK/CALL: 28%   RAISE: 22%   ALL_IN: 5%
-```
-
-### Key Metrics
-
-| Metric       | Target (ep 100K) | Warning sign           |
-|--------------|------------------|------------------------|
-| q_loss       | < 5.0            | > 10 at any point      |
-| policy_loss  | 1.0–1.5          | > 2.0 (diverging)      |
-| eval_reward  | > -0.3           | < -1.0 at ep 100K      |
-| FOLD%        | 30–40%           | > 80% after ep 50K     |
+The `br_proxy_bb100` column is the honest check on whether the best response is
+working. A rising mean with a wildly oscillating proxy means nothing has converged.
 
 ---
 
 ## Troubleshooting
 
-### FOLD% stuck at 100% after 50K episodes
+### FOLD% stuck near 100% after 50K episodes
 
-1. Verify running v3: `grep "NO ARTIFICIAL BONUS" scripts/train_nfsp_v3.py`
-2. Check `env.py` has no anti-fold bonus code
-3. Confirm reward scaling is `10.0` (not `1.0` or `50.0`)
+1. Confirm artificial bonuses are absent from `poker/ml/env.py`.
+2. Confirm `REWARD_SCALE == 0.5`.
+3. Check the fold-return loss is only active under obs v2 (it reads the
+   committed-fraction feature, which v1 does not have).
 
 ### q_loss stuck above 10
 
-1. Reduce learning rate: add `--lr 0.0002`
-2. Train longer (more exploration needed)
-3. Check GPU is being used: look for `[GPU]` in output
+1. Lower the Q learning rate: `--q-lr 0.0002`.
+2. Train longer — the warm-up gate is
+   `_q_min = max(batch_size, q_capacity // 100)`, so a large `q_capacity` delays
+   the first update substantially.
+3. Confirm GPU use: look for `[GPU]` in the first line of output.
 
-### eval_reward very negative (< -1.5) past episode 50K
+### `ValueError: could not broadcast input array` on load
 
-- Expected at ep 0–10K (normal)
-- Should reach > -0.3 by ep 50K
-- If still below -1.0 at ep 100K: reward signal is corrupted
+Fixed. `NFSPModel.load()` now sizes buffers to the checkpoint rather than assuming
+the constructor's capacities. If it reappears, the checkpoint buffer is larger than
+the configured capacity and `_ensure_buffer_capacity` did not run.
 
-### GPU not detected
+### Loading a checkpoint into the wrong encoder
 
-```bash
-python -c "import torch; print(torch.cuda.is_available())"
-# If False: check nvidia-smi and CUDA installation
-```
-
-### Out of memory (GPU)
-
-- Reduce `--num-players` to 2
-- Reduce batch size in script (requires code change)
-- Fall back to CPU (10–50x slower)
+`load()` validates metadata against weights and raises with a specific message
+("Checkpoint metadata obs_version=... does not match ... weights"). Do not
+hand-edit `model_meta` to force a load — the shapes will not match.
 
 ---
 
-## Multi-Generation Training (Optional)
-
-Train subsequent generations against previous ones for population-based self-play:
+## Validation
 
 ```bash
-# Gen 0 (baseline)
-python scripts/train_nfsp_selfplay.py --episodes 250000
+# One model across player counts
+python scripts/validate_training.py models/nfsp_v2/nfsp_v2.pt --hands 100
 
-# Continue training from checkpoint (loads previous model as frozen opponent)
-python scripts/train_nfsp_selfplay.py --episodes 250000 --checkpoint models/nfsp_4player.pt
+# A full scored table (every seat, Sense% checks)
+python scripts/validate_training.py --hands 200 --seed 1 \
+  --bots nfsp:models/nfsp_v2/nfsp_v2.pt sdcfr:models/sdcfr_prod/sdcfr_ckpt_500.pt random flop
+```
+
+`Sense%` flags decisions that look wrong: folding a strong hand, or making a large
+bet with a weak one. A healthy model sits above ~90%.
+
+### Engine validators
+
+```bash
+python scripts/validate_poker_logic.py
+python scripts/validate_game.py
+python scripts/verify_game_logic.py
+```
+
+Rebuild the v2 preflop equity table (needed by `build_observation_v2`):
+
+```bash
+python scripts/build_preflop_equity_table.py
 ```
 
 ---
@@ -278,16 +291,15 @@ python scripts/train_nfsp_selfplay.py --episodes 250000 --checkpoint models/nfsp
 ## File Reference
 
 | File | Purpose |
-|------|---------|
-| `scripts/train_nfsp_selfplay.py` | NFSP 4-player self-play training (recommended) |
-| `scripts/train_nfsp_production.py` | NFSP 2-player production training with full logging |
-| `scripts/train_sdcfr_extended.py` | SD-CFR extended training with checkpointing |
-| `scripts/train_sdcfr.py` | SD-CFR standard training |
-| `scripts/validate_training.py` | Validate NFSP/SD-CFR checkpoints anytime |
-| `scripts/test_sdcfr_s1.py` | SD-CFR model evaluation |
-| `scripts/test_4player_game.py` | 4-player game harness for environment validation |
-| `src/poker/ml/env.py` | RL environment (10× reward scaling) |
-| `src/poker/ml/models/nfsp_model.py` | NFSP algorithm |
-| `src/poker/ml/models/sdcfr_model.py` | SD-CFR algorithm |
-| `src/poker/ml/buffers.py` | Thread-safe replay buffers |
-| `src/poker/bots/call_bot.py` | CallBot (calling station opponent) |
+|---|---|
+| `scripts/train_nfsp_v2.py` | Current NFSP training (v2 encoder, pot-fraction, multi-seat) |
+| `scripts/train_nfsp_selfplay.py` | NFSP v1 training (98-wide, one learning seat) |
+| `scripts/train_sdcfr_selfplay.py` | Current SD-CFR training |
+| `scripts/train_sdcfr.py`, `train_sdcfr_extended.py` | Earlier SD-CFR runs |
+| `scripts/validate_training.py` | Single-model sweep or scored table |
+| `scripts/profile_training.py` | Training-loop profiler |
+| `poker/ml/env.py` | RL environment, `REWARD_SCALE` |
+| `poker/ml/models/nfsp_model.py` | NFSP |
+| `poker/ml/models/sdcfr_model.py` | SD-CFR |
+| `poker/ml/nfsp_loop.py` | One-hand transition writer for shared multi-seat models |
+| `docs/HYBRID_PLAN.md` | SD-CFR-as-teacher distillation design |

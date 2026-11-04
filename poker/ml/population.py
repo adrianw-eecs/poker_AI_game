@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Optional
 
+import torch
+
 from poker.bots.nfsp_bot import NFSPBot
 from poker.bots.random_bot import RandomBot
 from poker.bots.flop_bot import FlopBot
@@ -53,8 +55,6 @@ class PopulationManager:
 
         model = NFSPModel()
         model.load(str(gen_path))
-
-        # Cache the model for future use
         self._model_cache[gen_id] = model
         return model
 
@@ -91,18 +91,22 @@ class PopulationManager:
             opponents.append(FlopBot(name=f"FlopBot_{i}", seed=200 + i))
 
         # Add previous generation self-play
-        if self_play_count > 0 and current_gen > 0:
-            try:
-                prev_model = self.load_generation(current_gen - 1)
-                for i in range(self_play_count):
-                    bot = NFSPBot(
-                        name=f"GenBot_{current_gen-1}_{i}",
-                        model=prev_model,
-                        training=False  # Eval mode for opponents
-                    )
-                    opponents.append(bot)
-            except FileNotFoundError:
-                # Previous generation not saved yet, use RandomBot instead
+        if self_play_count > 0:
+            loaded = False
+            if current_gen > 0:
+                try:
+                    prev_model = self.load_generation(current_gen - 1)
+                    for i in range(self_play_count):
+                        opponents.append(NFSPBot(
+                            name=f"GenBot_{current_gen-1}_{i}",
+                            model=prev_model,
+                            training=False,
+                        ))
+                    loaded = True
+                except FileNotFoundError:
+                    pass
+            if not loaded:
+                # No prior generation available yet — fall back to RandomBot
                 for i in range(self_play_count):
                     opponents.append(RandomBot(name=f"RandomBot_fallback_{i}", seed=250 + i))
 

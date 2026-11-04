@@ -7,6 +7,14 @@ from poker.state.pot import Pot
 from poker.state.pot_manager import apply_rake, build_pots, distribute
 
 
+def test_build_pots_skips_zero_commitment() -> None:
+    """Folded players who put in nothing must not create a 0 main pot."""
+    pots = build_pots({0: 0, 1: 100, 2: 100}, {0})
+    assert len(pots) == 1
+    assert pots[0].amount == 200
+    assert pots[0].eligible_seats == frozenset({1, 2})
+
+
 def test_build_pots_equal_commitment() -> None:
     pots = build_pots({0: 100, 1: 100}, set())
     assert len(pots) == 1

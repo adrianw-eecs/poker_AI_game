@@ -371,22 +371,43 @@ for seat in non_folded:
 
 ## Testing Strategy
 
-### Unit Tests
-- Action validation
-- Hand evaluation
-- Pot distribution
-- Elimination detection
+235 tests total, of which 36 are marked `smoke`. The full suite runs in ~10 s.
 
-### Integration Tests (Smoke)
-- Multi-hand sessions
-- Rebuy mechanics
-- Player elimination
-- Chip conservation
+### Two tiers
 
-### End-to-End Tests
-- 8-player 50-hand games
-- Edge cases (side pots, run-it-twice)
-- Performance benchmarks
+- **Smoke** (`@pytest.mark.smoke`) — fast integration tests across subsystem
+  boundaries. Run these while editing:
+
+  ```bash
+  pytest -m smoke      # 36 tests, ~4 s
+  ```
+
+- **Full** — comprehensive unit and integration coverage. Run before pushing:
+
+  ```bash
+  pytest               # 235 tests, ~10 s
+  ```
+
+Do not use `--collect-only` expecting a large suite; the old 500+ test suite was
+consolidated into ~235 focused tests.
+
+### Coverage by area
+
+| Area | Key files |
+|---|---|
+| Multi-hand scenarios, chip conservation | `tests/integration/test_3player_scenarios.py` |
+| Session lifecycle, chip management | `tests/engine/test_session.py` |
+| Hand evaluation correctness | `tests/evaluation/test_evaluator.py` |
+| Statistics from game logs | `tests/stats/test_aggregator.py` |
+| RL env contract and encoding | `tests/ml/test_env.py` |
+| NFSP model and buffers | `tests/ml/test_nfsp.py`, `test_nfsp_v2.py` |
+| SD-CFR | `tests/ml/test_sdcfr.py` |
+| Betting / validation / pots | `tests/engine/`, `tests/state/` |
+
+Verified by manual audit (2026-11-03): hand ranking for all 11 categories,
+kickers and tiebreaks, 7-card best-five selection, blinds and action order
+(heads-up and 6-max), min-raise, side pots, odd-chip distribution, and zero chip
+leaks across ~1,200 randomly played hands at 2/6/9 players.
 
 ---
 
@@ -428,9 +449,29 @@ for seat in non_folded:
 
 ## References
 
-- **GameState**: `src/poker/state/game_state.py`
-- **Session**: `src/poker/engine/session.py`
-- **Betting**: `src/poker/engine/betting_round.py`
-- **Hand Flow**: `src/poker/engine/hand_engine.py`
-- **Showdown**: `src/poker/engine/showdown.py`
-- **Evaluation**: `src/poker/evaluation/evaluator.py`
+- **GameState**: `poker/state/game_state.py`
+- **Session**: `poker/engine/session.py`
+- **Betting**: `poker/engine/betting_round.py`
+- **Pure rules**: `poker/engine/rules.py`
+- **Hand Flow**: `poker/engine/hand_engine.py`
+- **Showdown**: `poker/engine/showdown.py`
+- **Evaluation**: `poker/evaluation/evaluator.py`
+
+---
+
+## Known Rule Deviation
+
+`BettingRound` tracks re-opening correctly: `reopens_betting(action, prior_max,
+prior_min)` returns True for a raise, and for an all-in only when
+`action.amount - prior_max >= prior_min`. `round_is_closed()` uses that to decide
+whether prior actors must act again.
+
+However, `legal_actions()` does **not** consult the re-open state when building the
+raise option. A player facing a short all-in is therefore still offered a raise,
+where real NLHE permits only call or fold. The betting round still *closes* correctly
+(the player is not forced to act if they choose to call), so this is a legal-action
+surface deviation rather than a chip-accounting bug.
+
+Fix direction: pass the "betting was re-opened?" flag into `legal_actions()` and
+suppress `Action.raise_to(...)` when the most recent aggressive action was a short
+all-in from a player who is now all-in.

@@ -1,5 +1,6 @@
 """Flop-focused bot strategy with simplified pair detection."""
 
+from poker.bots.progress import ensure_progressing_action
 from poker.domain.action import Action, ActionType
 from poker.rng import RNG
 from poker.state.game_state import GameState, Street
@@ -51,9 +52,10 @@ class FlopBot:
             action_by_type[action.type] = action
 
         if state.street == Street.PREFLOP:
-            return self._act_preflop(action_by_type)
+            chosen = self._act_preflop(action_by_type)
         else:  # FLOP, TURN, RIVER
-            return self._act_postflop(state, action_by_type)
+            chosen = self._act_postflop(state, action_by_type)
+        return ensure_progressing_action(state, chosen, legal)
 
     def _act_preflop(self, action_by_type: dict[ActionType, Action]) -> Action:
         """Pre-flop action: check or call to enter the flop.

@@ -43,16 +43,57 @@ def build_pots(committed_by_seat: dict[int, int], folded: set[int]) -> list[Pot]
             # No one is eligible for this pot (shouldn't happen with good data)
             continue
 
-        # Amount in this pot: difference from previous level, times number of contributors
+        # Amount in this pot: difference from previous level, times number of contributors.
+        # A 0 commitment level (folded players who put nothing in) must not create a pot.
         contributors = frozenset(
             seat for seat in all_seats if committed_by_seat.get(seat, 0) >= level
         )
         amount = (level - previous_level) * len(contributors)
+        if amount <= 0:
+            continue
 
         pots.append(Pot(amount=amount, eligible_seats=eligible))
         previous_level = level
 
     return pots
+
+
+def return_uncalled_bet(state: GameState) -> GameState:
+    """Give back the portion of a street bet that nobody else matched.
+
+    Folded players' chips stay in the pot. A side pot that two or more players
+    reached is left alone. Only a single seat above every other street
+    commitment is refunded, and an all-in flag is cleared if chips come back.
+    """
+    commits = [player.committed_this_street for player in state.players]
+    if not commits:
+        return state
+    highest = max(commits)
+    leaders = [seat for seat, amount in enumerate(commits) if amount == highest]
+    if highest <= 0 or len(leaders) != 1:
+        return state
+    others = [amount for seat, amount in enumerate(commits) if seat != leaders[0]]
+    second = max(others) if others else 0
+    excess = highest - second
+    if excess <= 0:
+        return state
+
+    seat = leaders[0]
+    player = state.players[seat]
+    refunded = (
+        player.with_stack(player.stack + excess)
+        .with_committed_this_street(player.committed_this_street - excess)
+        .with_committed_this_hand(player.committed_this_hand - excess)
+    )
+    if refunded.stack > 0 and refunded.is_all_in:
+        refunded = refunded.with_all_in(False)
+    players = list(state.players)
+    players[seat] = refunded
+    return replace(
+        state,
+        players=tuple(players),
+        current_bet_to_call=second,
+    )
 
 
 def rebuild_pots(state: GameState) -> GameState:
@@ -120,7 +161,23 @@ def distribute(
     Returns:
         Dict mapping seat to chips awarded from this distribution.
     """
+    awards, _details = distribute_detailed(pots, hand_ranks, dealer_seat)
+    return awards
+
+
+def distribute_detailed(
+    pots: list[Pot],
+    hand_ranks: dict[int, HandRank],
+    dealer_seat: int,
+) -> tuple[dict[int, int], list[tuple[int, tuple[int, ...], bool]]]:
+    """Distribute pots and report each pot's winners.
+
+    Returns:
+        Awards mapping seat to chips, and one (amount, winning_seats, split)
+        entry per pot that was awarded.
+    """
     awards: dict[int, int] = {}
+    details: list[tuple[int, tuple[int, ...], bool]] = []
 
     for pot in pots:
         # Find winners in this pot (best hand among eligible seats)
@@ -139,6 +196,7 @@ def distribute(
         # Find the best hand
         best_rank = max(eligible_ranks.values())
         winners = [seat for seat, rank in eligible_ranks.items() if rank == best_rank]
+        details.append((pot.amount, tuple(winners), len(winners) > 1))
 
         if len(winners) == 1:
             # Single winner gets the whole pot
@@ -168,4 +226,4 @@ def distribute(
                             winner_list.remove(seat)
                             break
 
-    return awards
+    return awards, details

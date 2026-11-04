@@ -149,6 +149,27 @@ def prompt(state: GameState, legal: list[Action]) -> Action:
         print(f"  Invalid input '{raw}'. Valid commands: {', '.join(valid_cmds)}")
 
 
+def format_showdown_labels(
+    ranks: dict[int, HandRank],
+    best_cards: dict[int, tuple],
+) -> dict[int, str]:
+    """Return the same rank text the showdown display uses for each seat."""
+    labels: dict[int, str] = {}
+    for seat, hand_rank in ranks.items():
+        cards = best_cards.get(seat, ())
+        other_hands = [
+            (rank, best_cards[other])
+            for other, rank in ranks.items()
+            if other != seat and other in best_cards
+        ]
+        show_kicker, kicker_rank = should_show_kicker_and_card(hand_rank, cards, other_hands)
+        if show_kicker and kicker_rank is not None:
+            labels[seat] = _hand_rank_with_kicker(hand_rank, kicker_rank)
+        else:
+            labels[seat] = _hand_rank_without_extra_kicker(hand_rank)
+    return labels
+
+
 def display_showdown(final_state: GameState, awards: dict[int, int]) -> None:
     """Display showdown information including cards, hands, and results."""
     lines: list[str] = []
@@ -182,24 +203,16 @@ def display_showdown(final_state: GameState, awards: dict[int, int]) -> None:
             else:
                 player_hands[seat] = ("no showdown", None, None)
 
+    ranked: dict[int, HandRank] = {}
+    best: dict[int, tuple] = {}
     hand_displays: dict[int, str] = {}
     for seat, (hand_rank, best_5_cards, _) in player_hands.items():
         if isinstance(hand_rank, str):
             hand_displays[seat] = hand_rank
         else:
-            other_hands = [
-                (rank, cards)
-                for s, (rank, cards, _) in player_hands.items()
-                if s != seat and isinstance(rank, HandRank)
-            ]
-            show_kicker, kicker_rank = should_show_kicker_and_card(
-                hand_rank, best_5_cards, other_hands
-            )
-            if show_kicker and kicker_rank is not None:
-                hand_eval = _hand_rank_with_kicker(hand_rank, kicker_rank)
-            else:
-                hand_eval = _hand_rank_without_extra_kicker(hand_rank)
-            hand_displays[seat] = hand_eval
+            ranked[seat] = hand_rank
+            best[seat] = best_5_cards
+    hand_displays.update(format_showdown_labels(ranked, best))
 
     num_players = len(final_state.players)
     for seat, player in enumerate(final_state.players):

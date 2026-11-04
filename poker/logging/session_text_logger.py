@@ -5,11 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from poker.logging.events import ActionTaken, Event, HandEnded, HandStarted, StreetEnded
+from poker.logging.events import Event, HandEnded, SessionEnded
+from poker.logging.transcript import render_event
 
 
 class SessionTextLogger:
-    """Writes a single human-readable transcript for an entire session."""
+    """Writes a single human-readable transcript for an entire session.
+
+    Lines are rendered from the same events as the JSONL log. The buffer
+    is flushed when a hand or the session ends.
+    """
 
     def __init__(self, filepath: Path | str, *, header: str | None = None, seed: int | None = None) -> None:
         self.filepath = Path(filepath)
@@ -25,50 +30,13 @@ class SessionTextLogger:
         self.flush()
 
     def log_event(self, event: Event) -> None:
-        if isinstance(event, HandStarted):
-            self._buffer.append(
-                f"{'=' * 60}\n"
-                f"Hand #{event.hand_number + 1} started | dealer_seat={event.dealer_seat} "
-                f"| blinds={event.small_blind}/{event.big_blind}\n"
-                f"{'=' * 60}\n\n"
-            )
-            self.flush()  # Flush after hand start
-            return
-
-        if isinstance(event, ActionTaken):
-            if event.log_line:
-                self._buffer.append(f"{event.log_line}\n")
-            else:
-                amt = f" (+{event.chips_added})" if event.chips_added else ""
-                self._buffer.append(
-                    f"[Hand #{event.hand_number + 1} | {event.street.upper()} | "
-                    f"#{event.action_num}] seat {event.seat}: "
-                    f"{event.action_type.upper()} {event.amount}{amt} "
-                    f"| Pot: {event.pot_after}\n"
-                )
-            self.flush()  # Flush after each action
-            return
-
-        if isinstance(event, StreetEnded):
-            if event.street == "REPLAY":
-                self._buffer.append(event.snapshot)
-                if not event.snapshot.endswith("\n"):
-                    self._buffer.append("\n")
-            else:
-                self._buffer.append(f"[End of {event.street}]\n")
-                self._buffer.append(event.snapshot)
-                if not event.snapshot.endswith("\n"):
-                    self._buffer.append("\n")
-            self.flush()  # Flush after each street ends
-            return
-
-        if isinstance(event, HandEnded):
-            dist = " ".join(
-                f"seat{seat}={chips}" for seat, chips in sorted(event.chip_distribution.items())
-            )
-            self._buffer.append(f"Hand ended | chip_distribution: {dist}\n\n")
-            self.flush()  # Flush after hand ends
-            return
+        text = render_event(event)
+        if text:
+            if not text.endswith("\n"):
+                text += "\n"
+            self._buffer.append(text)
+        if isinstance(event, (HandEnded, SessionEnded)):
+            self.flush()
 
     def log_text(self, text: str) -> None:
         """Log raw text directly to the transcript file.

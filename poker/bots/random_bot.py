@@ -1,5 +1,6 @@
 """Random bot implementation."""
 
+from poker.bots.progress import ensure_progressing_action
 from poker.domain.action import Action, ActionType
 from poker.rng import RNG
 from poker.state.game_state import GameState
@@ -125,12 +126,13 @@ class RandomBot:
                 min_raise_amount = raise_action.amount
                 max_raise_amount = all_in_action.amount
                 amount = self._rng.randint(min_raise_amount, max_raise_amount)
-                return Action.raise_to(amount)
+                chosen = Action.raise_to(amount)
             else:
                 # Fallback: use the raise action as-is if we can't extract bounds
-                return raise_action if raise_action else action_by_type[chosen_type]
-
-        return action_by_type[chosen_type]
+                chosen = raise_action if raise_action else action_by_type[chosen_type]
+        else:
+            chosen = action_by_type[chosen_type]
+        return ensure_progressing_action(state, chosen, legal)
 
     def observe_result(self, final_state: GameState, reward: float) -> None:
         """Ignore the hand outcome (random bot does not learn).
