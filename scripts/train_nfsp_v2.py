@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import shutil
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -31,12 +30,11 @@ from poker.bots.nfsp_bot import NFSPBot
 from poker.bots.random_bot import RandomBot
 from poker.bots.sdcfr_bot import SDCFRBot
 from poker.ml.action_space import BetScheme
-from poker.ml.env import PokerEnv, REWARD_SCALE
+from poker.ml.env import PokerEnv
 from poker.ml.metrics import bb100_interval
 from poker.ml.models.nfsp_model import NFSPModel
 from poker.ml.population import PopulationManager
 from poker.ml.models.sdcfr_model import SDCFRModel
-from poker.ml.observation_v2 import OBS_V2_DIM
 
 # Evaluation constants
 _EVAL_SEED = 17_001
@@ -146,7 +144,7 @@ def evaluate(
                     max_bet=max_bet,
                     stall_guard=stall_guard,
                     stall_counts=stall_counts,
-                    obs_version=2,
+                    obs_version=int(getattr(model, "obs_version", 2)),
                     bet_scheme=BetScheme.POT_FRACTION,
                 )
                 env.hand_number = h
@@ -202,7 +200,7 @@ def evaluate_vs_sdcfr(
                 max_bet=max_bet,
                 stall_guard=stall_guard,
                 stall_counts=stall_counts,
-                obs_version=2,
+                obs_version=int(getattr(model, "obs_version", 2)),
                 bet_scheme=BetScheme.POT_FRACTION,
             )
             env.hand_number = h
@@ -258,7 +256,7 @@ def evaluate_sdcfr_only(
                 max_bet=max_bet,
                 stall_guard=stall_guard,
                 stall_counts=stall_counts,
-                obs_version=2,
+                obs_version=int(getattr(model, "obs_version", 2)),
                 bet_scheme=BetScheme.POT_FRACTION,
             )
             env.hand_number = h
@@ -350,6 +348,21 @@ def main() -> None:
                         help="Policy batch threshold (default: batch_size)")
     parser.add_argument("--model-name", type=str, default="nfsp_v2",
                         help="Model folder name (saved to models/MODEL_NAME/)")
+    parser.add_argument("--obs-version", type=int, default=3, choices=(2, 3),
+                        help="Observation encoder: 2 (318-wide) or 3 (354-wide, adds "
+                             "opponent tendencies + attention). A v2 checkpoint cannot "
+                             "load into v3.")
+    parser.add_argument("--value-distribution", type=str, default="c51",
+                        choices=("none", "c51"),
+                        help="Q head: scalar ('none') or categorical distribution ('c51')")
+    parser.add_argument("--num-atoms", type=int, default=51)
+    parser.add_argument("--vmin", type=float, default=-10.0)
+    parser.add_argument("--vmax", type=float, default=10.0)
+    parser.add_argument("--n-step", type=int, default=3,
+                        help="Bootstrap every N decisions instead of every 1")
+    parser.add_argument("--reservoir-min-prob", type=float, default=0.25,
+                        help="Exponential averaging floor for the average-policy "
+                             "reservoir; 0 = uniform (drags the policy backward)")
 
     args = parser.parse_args()
 
@@ -373,12 +386,10 @@ def main() -> None:
     if args.policy_batch_threshold is not None:
         print(f"[INFO] Setting policy batch threshold to {args.policy_batch_threshold}")
 
-    # v2 training requires the 318-wide hero-relative encoder throughout: the
-    # env is built with obs_version=2 below, and _begin / evaluate also use v2.
-    # Omitting these made the model default to v1 (98-wide), which then failed
-    # in _prepare_obs with "Cannot adapt observation of length 318 to 98".
+    # The env, eval helpers and _begin all follow model.obs_version, so this
+    # flag controls the encoder for the whole run.
     model = NFSPModel(
-        obs_version=2,
+        obs_version=args.obs_version,
         bet_scheme=BetScheme.POT_FRACTION,
         eta=args.eta,
         updates_per_train=args.updates_per_train,
@@ -389,24 +400,38 @@ def main() -> None:
         q_lr=2.5e-4,
         policy_lr=1e-4,
         target_sync_every=300,
+        # These were previously implicit defaults of NFSPModel. They are passed
+        # explicitly so this trainer's behaviour is reproducible and can be
+        # ablated from the command line rather than changing under it.
+        reservoir_min_prob=args.reservoir_min_prob,
+        n_step=args.n_step,
+        value_distribution=args.value_distribution,
+        num_atoms=args.num_atoms,
+        vmin=args.vmin,
+        vmax=args.vmax,
     )
 
     training_meta: Dict = {}
     if args.checkpoint:
+        # Check the encoder BEFORE loading: load() rebuilds the network from the
+        # checkpoint's own shapes, so a width mismatch surfaces as an opaque
+        # "Error(s) in loading state_dict" instead of an actionable message.
+        _ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        _q_state = _ck.get("q_network", {})
+        _ck_version = 3 if "table_mlp.0.weight" in _q_state and int(
+            _q_state["table_mlp.0.weight"].shape[1]
+        ) + 7 == 354 else (2 if "table_mlp.0.weight" in _q_state else 1)
+        del _ck, _q_state
+        if _ck_version != args.obs_version:
+            raise SystemExit(
+                f"Refusing {args.checkpoint}: checkpoint obs_version={_ck_version}, "
+                f"but --obs-version is {args.obs_version}. A v2 checkpoint cannot "
+                "load into v3; pass a matching --obs-version or a matching checkpoint."
+            )
         print(f"[LOAD] {args.checkpoint}")
         training_meta = model.load(args.checkpoint)
         print(f"[LOAD] eta={model.eta}, updates_per_train={model.updates_per_train}")
         print(f"[OVERRIDE] Command line: eta={args.eta}, updates_per_train={args.updates_per_train}")
-        
-        # A v1 checkpoint cannot run under the v2 env, so refuse rather than
-        # continuing into an observation-width crash mid-episode.
-        checkpoint_obs_version = int(model.obs_version)
-        if checkpoint_obs_version != 2:
-            raise SystemExit(
-                f"Refusing {args.checkpoint}: checkpoint obs_version={checkpoint_obs_version}, "
-                "but v2 training requires obs v2 (318-dim). "
-                "Use a v2 checkpoint such as models/nfsp_v2/nfsp_v2.pt."
-            )
         
         model.eta = args.eta
         model.updates_per_train = args.updates_per_train
@@ -467,7 +492,7 @@ def main() -> None:
             small_blind=25,
             big_blind=50,
             seed=int(np.random.randint(0, 2**31 - 1)),
-            obs_version=2,
+            obs_version=int(getattr(model, "obs_version", 2)),
             bet_scheme=BetScheme.POT_FRACTION,
         )
 

@@ -207,6 +207,8 @@ class NFSPModel:
         # kappa=0 reproduces plain NFSP exactly.
         self.distill_kappa = float(distill_kappa)
         self._distill_buffer: WeightedCircularBuffer | None = None
+        # Set during load() when the checkpoint predates the C51 head.
+        self._has_fresh_dist_head = False
 
         self.device = torch.device(
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -1058,6 +1060,13 @@ class NFSPModel:
         elif self.value_distribution == "c51" and not hasattr(self.q_network, "dist_head"):
             self._install_distributional_heads()
 
+        # A checkpoint written before the distributional branch existed has no
+        # dist_head parameters. Those weights still load; the new head starts
+        # from its zero initialisation, which is the intended starting point.
+        self._has_fresh_dist_head = (
+            self.value_distribution == "c51" and "dist_head.weight" not in q_state
+        )
+
     def _ensure_buffer_width(self, obs_dim: int) -> None:
         dtype = self._obs_dtype
         if self.q_buffer.obs_dim != obs_dim or self.q_buffer.dtype != dtype:
@@ -1114,15 +1123,16 @@ class NFSPModel:
         if meta.get("shared_trunk"):
             self.shared_trunk = True
         self._rebuild_networks(q_state, policy_state)
-        if self.shared_trunk:
+        hybrid_state = getattr(self, "shared_trunk", False)
+        if hybrid_state:
             # One module, one state dict: loading it twice would be redundant
             # and the two saved copies are identical.
             self.q_network.load_state_dict(q_state)
             self.target_network.load_state_dict(checkpoint["target_network"])
         else:
-            self.q_network.load_state_dict(q_state)
+            self.q_network.load_state_dict(q_state, strict=not self._has_fresh_dist_head)
             self.policy_network.load_state_dict(policy_state)
-            self.target_network.load_state_dict(checkpoint["target_network"])
+            self.target_network.load_state_dict(checkpoint["target_network"], strict=not self._has_fresh_dist_head)
         if "q_optimizer" in checkpoint:
             try:
                 self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
