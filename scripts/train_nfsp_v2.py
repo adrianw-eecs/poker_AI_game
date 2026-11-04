@@ -296,6 +296,25 @@ def _build_training_meta(
     }
 
 
+def _write_history_row(path: Path, row: dict[str, object]) -> None:
+    """Append one evaluation row, writing the header on first use.
+
+    Columns are taken from the first row written, so a later row with a
+    different key set (sdcfr-only vs standard eval) would misalign. Keys are
+    therefore unioned against the existing header when the file already exists.
+    """
+    if path.is_file():
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh), [])
+        if header:
+            row = {k: row.get(k, "") for k in header}
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+        if fh.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NFSP v2 Multi-Seat Self-Play Training")
     parser.add_argument("--checkpoint", type=str, default=None,
@@ -559,6 +578,40 @@ def main() -> None:
                 print(f"      Random+Flop:  {lower:+.1f} to {upper:+.1f} BB/100 (n={n})")
                 print(f"      vs SD-CFR:    {sdcfr_lower:+.1f} to {sdcfr_upper:+.1f} BB/100 (n={sdcfr_n})")
 
+            # Append this evaluation to the CSV history. history_path was
+            # computed but never written, so runs produced no record to compare
+            # later (docs/PERFORMANCE.md relies on this file).
+            try:
+                _row = {
+                    "episode": episode,
+                    "eta": model.eta,
+                    "updates_per_train": model.updates_per_train,
+                    "q_buffer": len(model.q_buffer),
+                    "policy_buffer": len(model.policy_buffer),
+                    "q_updates": model._q_updates,
+                    "p_updates": model._p_updates,
+                    "q_loss": last_q_loss,
+                    "p_loss": last_p_loss,
+                    "sdcfr_mean_bb100": sdcfr_mean,
+                    "sdcfr_lower_bb100": sdcfr_lower,
+                    "sdcfr_upper_bb100": sdcfr_upper,
+                    "sdcfr_n": sdcfr_n,
+                    "best_lower_bb100": best_lower,
+                    "stalls": stalls,
+                }
+                if not args.sdcfr_eval_only:
+                    _row.update(
+                        {
+                            "random_mean_bb100": mean,
+                            "random_lower_bb100": lower,
+                            "random_upper_bb100": upper,
+                            "random_n": n,
+                        }
+                    )
+                _write_history_row(history_path, _row)
+            except OSError as exc:
+                print(f"      [WARN] could not write eval history: {exc}")
+
             # Always track SD-CFR performance for best model selection
             if sdcfr_lower > best_lower:
                 best_lower = sdcfr_lower
@@ -584,7 +637,20 @@ def main() -> None:
             break
 
     elapsed = time.time() - start
-    
+
+    # Write the final artifact. Without this the run only produced nfsp_best.pt
+    # and the periodic generations, leaving save_path pointing at whatever old
+    # file already occupied that name.
+    if best_path is not None and best_path.is_file():
+        shutil.copy(best_path, save_path)
+        print(f"  [FINAL] Copied {best_path.name} -> {save_path.name}")
+    else:
+        model.save(
+            str(save_path),
+            training_meta=_build_training_meta(episode, best_lower, stalls, model),
+        )
+        print(f"  [FINAL] Saved {save_path.name}")
+
     # Fix for Issue #2: Calculate actual training time vs expected
     expected_time_minutes = args.episodes / 100  # Estimate: 1 episode ~0.1 min
     actual_time_minutes = elapsed / 60
