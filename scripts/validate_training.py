@@ -34,7 +34,11 @@ from poker.domain.card import Card
 from poker.domain.hand import HandType
 from poker.engine.action_validator import legal_actions
 from poker.evaluation.evaluator import evaluate
-from poker.ml.action_space import action_to_action_index
+from poker.ml.action_space import (
+    BetScheme,
+    action_index_to_action,
+    action_to_action_index,
+)
 from poker.ml.env import REWARD_SCALE, PokerEnv
 from poker.ml.models.nfsp_model import NFSPModel
 from poker.ml.models.sdcfr_model import SDCFRModel
@@ -344,6 +348,46 @@ def _nfsp_env_kwargs(model: object) -> dict:
     scheme = getattr(model, "bet_scheme", None)
     if scheme is not None:
         kwargs["bet_scheme"] = scheme
+    return kwargs
+
+
+def _table_encoding(seated: list[_Seat]) -> dict:
+    """Encoding the shared env must use, given every model at the table.
+
+    One ``PokerEnv`` serves all seats, so a single encoding has to satisfy every
+    checkpoint. Model seats are checked first and must agree; a disagreement is
+    a configuration error rather than something to paper over, because a v1 bot
+    cannot consume a v2 observation or vice versa.
+    """
+    versions: set[int] = set()
+    schemes: set[object] = set()
+    for seat in seated:
+        model = seat.model
+        if model is None:
+            continue
+        if seat.kind not in ("nfsp", "sdcfr"):
+            continue
+        versions.add(int(getattr(model, "obs_version", 1)))
+        scheme = getattr(model, "bet_scheme", None)
+        if scheme is not None:
+            schemes.add(scheme)
+
+    if len(versions) > 1:
+        raise SystemExit(
+            "Seated models need different observation encoders "
+            f"(obs_version={sorted(versions)}). One table cannot serve both; "
+            "run them in separate invocations."
+        )
+    if len(schemes) > 1:
+        raise SystemExit(
+            f"Seated models need different bet schemes ({sorted(s.value for s in schemes)}). "
+            "Run them in separate invocations."
+        )
+    if not versions:
+        return {}
+    kwargs: dict = {"obs_version": versions.pop()}
+    if schemes:
+        kwargs["bet_scheme"] = schemes.pop()
     return kwargs
 
 
@@ -778,7 +822,37 @@ def _learning_action(env: PokerEnv, seat: _Seat, obs, mask) -> int:
     else:
         bot = FlopBot(name=seat.label)
     action = bot.act(env.state.view_for(env.learning_seat), legal)
-    return action_to_action_index(action, env.state, env.learning_seat)
+    # Convert the bot's concrete action back to an index the env will accept.
+    # action_to_action_index assumes LEGACY bucketing, so on a POT_FRACTION
+    # table it can return an index whose meaning differs; pick the legal index
+    # whose concrete action matches instead.
+    return _index_for_action(action, env.state, env.learning_seat, env.bet_scheme)
+
+
+def _index_for_action(
+    action: Action, state: GameState, seat: int, scheme: BetScheme
+) -> int:
+    """Index in the env's action space that reproduces ``action``.
+
+    Prefers an exact (type, amount) match. Falls back to the kind of action so
+    a size mismatch still produces a legal move rather than crashing.
+    """
+    for idx in range(7):
+        try:
+            candidate = action_index_to_action(idx, state, seat, scheme=scheme)
+        except ValueError:
+            continue
+        if candidate.type == action.type and candidate.amount == action.amount:
+            return idx
+    for idx in range(7):
+        try:
+            candidate = action_index_to_action(idx, state, seat, scheme=scheme)
+        except ValueError:
+            continue
+        if candidate.type == action.type:
+            return idx
+    # Nothing matched: check/call is the safest legal default.
+    return 1
 
 
 def _terminal_model_reward(env: PokerEnv, seat: int) -> float:
@@ -848,9 +922,18 @@ def test_bot_table(
             learning_seat = hand_idx % len(seated)
             learner = seated[learning_seat]
             seed = int(np.random.randint(0, 2**31 - 1))
+            # The env's encoding drives every bot at the table, so it cannot be
+            # taken from the learner alone: if the learner is `random`/`flop`
+            # this was `{}`, the env defaulted to obs v1 (98-wide), and any
+            # v2 checkpoint at the table then received a 98-wide observation
+            # ("mat1 and mat2 shapes cannot be multiplied 1x91 and 311x256").
+            env_kwargs = _table_encoding(seated)
             learner_encoding = (
                 _nfsp_env_kwargs(learner.model) if learner.kind == "nfsp" and learner.model is not None else {}
             )
+            # A model's own encoding always wins for that model; the table
+            # encoding only fills in the case where no model specifies one.
+            encoding = {**env_kwargs, **learner_encoding}
             env = PokerEnv(
                 num_players=len(seated),
                 learning_seat=learning_seat,
@@ -861,7 +944,7 @@ def test_bot_table(
                 big_blind=_DEFAULT_BB,
                 ante=0,
                 seed=seed,
-                **learner_encoding,
+                **encoding,
             )
             env.hand_number = hand_idx
             saved_counts = {label: counts.copy() for label, counts in action_counts.items()}
