@@ -46,6 +46,8 @@ from poker.ml.action_space import (
 )
 from poker.ml.observation import OBS_DIM, build_observation
 from poker.ml.observation_v2 import OBS_V2_DIM, build_observation_v2
+from poker.ml.observation_v3 import OBS_V3_DIM, build_observation_v3
+from poker.ml.tendencies import TendencyTracker
 from poker.rng import RNG
 from poker.state.game_state import GameState, Street
 from poker.state.player_state import PlayerState
@@ -122,8 +124,8 @@ class PokerEnv(gym.Env):
             )
         if rake_percent < 0 or rake_percent > 10:
             raise ValueError(f"rake_percent must be in [0, 10], got {rake_percent}")
-        if obs_version not in (1, 2):
-            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
+        if obs_version not in (1, 2, 3):
+            raise ValueError(f"obs_version must be 1, 2 or 3, got {obs_version}")
 
         self.num_players = num_players
         self.starting_stack = starting_stack
@@ -142,7 +144,10 @@ class PokerEnv(gym.Env):
         self.bet_scheme = bet_scheme
         self.dedup_mask = dedup_mask
         self.obs_version = obs_version
-        self._obs_dim = OBS_DIM if obs_version == 1 else OBS_V2_DIM
+        self._obs_dim = {1: OBS_DIM, 2: OBS_V2_DIM, 3: OBS_V3_DIM}[obs_version]
+        # v3 appends rolling opponent tendencies, which persist across hands
+        # within one sitting. Reset by reset_multi / start_next_hand_multi.
+        self.tendencies = TendencyTracker(num_players=num_players) if obs_version == 3 else None
 
         self.config = GameConfig(
             num_players=num_players,
@@ -370,6 +375,8 @@ class PokerEnv(gym.Env):
         self._stall_key = None
         self._stall_repeats = 0
         self.prev_equity = 0.5
+        if self.tendencies is not None:
+            self.tendencies.start_hand()
         self._run_until_decision()
         if self.state.action_on_seat is None:
             return -1, np.zeros(self._obs_dim, dtype=np.float32), np.zeros(7, dtype=np.int32)
@@ -382,6 +389,16 @@ class PokerEnv(gym.Env):
         prior_max = self._max_commitment
         prior_min = max(self.state.config.big_blind, self.state.last_raise_size)
         self._players_acted.add(seat)
+        if self.tendencies is not None:
+            # Feed the rolling tracker before the state changes, so "facing a
+            # bet" reflects what the actor actually saw.
+            self.tendencies.record_action(
+                seat,
+                action.type,
+                street_is_preflop=self.state.street == Street.PREFLOP,
+                facing_bet=self.state.current_bet_to_call
+                > self.state.players[seat].committed_this_street,
+            )
         state = apply_action(self.state, seat, action)
         state = rebuild_pots(state)
         self._max_commitment = max(
@@ -536,6 +553,10 @@ class PokerEnv(gym.Env):
         if self.state is None:
             raise RuntimeError("State not initialized")
         state = self.state
+        if self.tendencies is not None:
+            # Hand is over: fold per-hand flags into the rolling counters. Done
+            # before the awards so a feature never depends on the outcome.
+            self.tendencies.end_hand()
         if len(state.community_cards) > 5:
             non_folded = [i for i, player in enumerate(state.players) if not player.has_folded]
             total_pot = sum(player.committed_this_hand for player in state.players)
@@ -587,6 +608,8 @@ class PokerEnv(gym.Env):
 
     def _observe(self, seat: int) -> npt.NDArray[np.float32]:
         assert self.state is not None
+        if self.obs_version == 3:
+            return build_observation_v3(self.state, seat, self.tendencies)
         if self.obs_version == 2:
             return build_observation_v2(self.state, seat)
         return build_observation(self.state, seat)

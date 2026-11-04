@@ -178,6 +178,7 @@ class PokerNetwork(nn.Module):
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
+        self.num_actions = num_actions
 
         self.input_proj = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -199,12 +200,24 @@ class PokerNetwork(nn.Module):
             nn.init.zeros_(self.head.weight)
             nn.init.zeros_(self.head.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def trunk_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared representation before the final Linear head."""
         x = self.input_proj(x)
         for block in self.res_blocks:
             x = block(x)
-        x = self.output_proj(x)
-        return self.head(x)
+        return self.output_proj(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.trunk_forward(x)
+        dist_head = getattr(self, "dist_head", None)
+        if dist_head is not None:
+            num_actions = int(getattr(self, "num_actions", 7))
+            atoms = dist_head.out_features // num_actions
+            logits = dist_head(hidden).view(-1, num_actions, atoms)
+            probs = torch.softmax(logits, dim=-1)
+            support = torch.linspace(self.vmin, self.vmax, atoms, device=hidden.device)
+            return (probs * support).sum(dim=-1)
+        return self.head(hidden)
 
 
 def build_q_network(
@@ -358,11 +371,13 @@ class PokerNetV2(nn.Module):
             dim=-1,
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        legal_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def trunk_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared representation, before the heads.
+
+        Exposed so distributional (C51) heads can be applied outside ``forward``:
+        widening ``adv_head`` to ``num_actions * num_atoms`` makes the dueling
+        combination in ``forward`` shape-incompatible with a scalar value.
+        """
         ids = x[:, : self.card_slots].round().long().clamp(0, self.empty_card)
         emb = self._embed(ids)
         hole = torch.cat([emb[:, 0], emb[:, 1]], dim=-1)
@@ -374,8 +389,33 @@ class PokerNetV2(nn.Module):
         hidden = self.dropout(F.relu(self.merge(self.merge_norm(torch.cat([card_h, table_h], dim=-1)))))
         for block in self.trunk:
             hidden = block(hidden)
+        return hidden
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        legal_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = self.trunk_forward(x)
         if self.head_type == "policy":
             return self.policy_head(hidden)
+
+        # When a distributional (C51) branch is attached, ``forward`` returns
+        # the expectation of that distribution so every existing caller keeps
+        # seeing one meaningful value per action.
+        dist_head = getattr(self, "dist_head", None)
+        if dist_head is not None:
+            atoms = dist_head.out_features // self.num_actions
+            logits = dist_head(hidden).view(-1, self.num_actions, atoms)
+            probs = torch.softmax(logits, dim=-1)
+            support = torch.linspace(self.vmin, self.vmax, atoms, device=hidden.device)
+            scalar = (probs * support).sum(dim=-1)
+            if legal_mask is not None:
+                mask = legal_mask.bool()
+                if mask.dim() == 1:
+                    mask = mask.unsqueeze(0)
+                scalar = scalar.masked_fill(~mask, float("-inf"))
+            return scalar
 
         value = self.value_head(hidden)
         advantages = self.adv_head(hidden)

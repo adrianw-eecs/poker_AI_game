@@ -144,6 +144,8 @@ def test_warmup_gate_counts_hands_and_opens_early() -> None:
     for i in range(2 * model.batch_size):
         o = _obs(i)
         model.store_transition(o, 1, 0.0, o, False, next_mask=MASK, current_mask=MASK)
+    # n-step buffering holds the tail of the window, so flush before reading.
+    model.flush_pending()
     assert model.ready_to_train_q(), "row-count fallback did not open the gate"
 
     # With hands reported, a smaller number of rows suffices.
@@ -154,6 +156,7 @@ def test_warmup_gate_counts_hands_and_opens_early() -> None:
     for i in range(hands_model._q_min):
         o = _obs(i)
         hands_model.store_transition(o, 1, 0.0, o, False, next_mask=MASK, current_mask=MASK)
+    hands_model.flush_pending()
     assert hands_model.ready_to_train_q()
 
     # Hands alone, with no rows, is still not enough.

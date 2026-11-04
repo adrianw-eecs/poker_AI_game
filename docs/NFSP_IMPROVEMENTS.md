@@ -1,5 +1,9 @@
 # NFSP: Observation Gaps and Training Improvements
 
+> **Status (2026-11-03): items 1â€“7 are implemented.** See Â§6 for what shipped,
+> how to enable or disable each, and the two measurement questions that remain
+> open. The analysis below is kept as the rationale.
+
 An audit of what the v2 encoder captures, what it misses, and what would most
 reduce training time or improve final performance. Ordered by expected impact.
 
@@ -192,3 +196,74 @@ to near zero on the reservoir task). Before adding capacity, verify the loss cur
 in `eval_history.csv`; if `policy_loss` plateaus above ~1.5 while `q_loss`
 continues to fall, that indicates capacity or representation limits worth
 addressing. Otherwise, invest in features and replay ratio instead.
+
+---
+
+## 6. What shipped (2026-11-03)
+
+All seven changes are implemented and on by default. Each has an off switch so
+the plateau hypothesis can still be tested by ablation.
+
+| # | Change | Where | Off switch |
+|---|---|---|---|
+| 1 | Exponential averaging in the average-policy reservoir | `ReservoirBuffer(min_prob=)` | `--reservoir-min-prob 0` |
+| 2 | Shared trunk (with the PCGrad caveat below) | `NFSPModel(shared_trunk=)` | omit `--shared-trunk` |
+| 3 | Rolling opponent tendencies (VPIP/PFR/AF/fold-to-bet) | `poker/ml/tendencies.py` | `--obs-version 2` |
+| 4 | n-step returns | `NFSPModel(n_step=)` | `--n-step 1` |
+| 5 | Smaller batch, more updates | trainer flags | `--batch-size 2048 --updates-per-train 1` |
+| 6 | C51 distributional value head | `NFSPModel(value_distribution="c51")` | `--value-distribution none` |
+| 7 | Attention over occupied seats | `poker/ml/models/nfsp_networks_v3.py` | `--obs-version 2` |
+
+### Observation v3
+
+354 floats: the v2 vector (318) followed by 36 tendency floats (4 per seat).
+The v2 prefix is byte-identical, verified by test, so v3 is a strict extension.
+Tendencies are smoothed toward a Beta prior and computed from *completed hands*
+only, so a feature never depends on the hand in progress.
+
+v3 is the default for `train_hybrid.py`. **v2 checkpoints cannot load into v3** —
+they have a different input width and a different network class.
+
+### Distributional value (C51)
+
+The Q network keeps its scalar dueling head and gains a parallel `dist_head`
+emitting `7 x 51` logits. `forward()` returns the expectation, so every existing
+call site (argmax, gather, TD targets, tests reading `q_network(x)`) is unchanged.
+Support defaults to `[-10, 10]`; with `REWARD_SCALE = 0.5` and returns in
+stack-change units, a busted hand is about -5, so the support has headroom.
+
+### n-step returns
+
+`store_transition` buffers up to `n_step` transitions and emits discounted sums.
+A partial window is flushed by `end_hand()` (called by all trainers) or by
+`flush_pending()`. Callers that store transitions without ever reporting hand
+end must call `flush_pending()` before expecting the buffer to be full.
+
+### Two things NOT done
+
+1. **PCGrad is not implemented.** `shared_trunk` still shares one representation
+   between the Q and policy losses with no gradient surgery, so the two
+   objectives can still interfere. `docs/HYBRID_PLAN.md` calls this out as the
+   principled version of sharing; it remains open.
+2. **No ablation has been run.** The seven changes were verified to work
+   individually but not measured against each other. The plateau question §1
+   posed is still unanswered — see below.
+
+### The measurement that should come next
+
+Everything here is implemented, and none of it is proven to help. Run these
+against the same seed and compare `eval_history.csv`:
+
+```bash
+# control: reproduce the old behaviour
+python scripts/train_hybrid.py --teacher models/sdcfr_v2/sdcfr_v2.pt \
+  --obs-version 2 --value-distribution none --n-step 1 \
+  --reservoir-min-prob 0 --batch-size 2048 --updates-per-train 1 \
+  --episodes 60000 --model-name abl_control
+
+# one change at a time, then all together
+```
+
+The question §1 raised — learning dynamics (1, 4, 6) versus representation
+(3, 7) — is answerable with four runs. Guessing wrong means rebuilding the wrong
+thing, so measure before investing further.

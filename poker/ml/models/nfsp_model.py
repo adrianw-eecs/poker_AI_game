@@ -1,6 +1,6 @@
 """Neural Fictitious Self-Play (NFSP) model."""
 
-from typing import Any
+from collections import deque
 
 import numpy as np
 import numpy.typing as npt
@@ -13,6 +13,7 @@ from poker.ml.buffers import CircularBuffer, ReservoirBuffer, WeightedCircularBu
 from poker.ml.cfr.regret_matching import regret_matching
 from poker.ml.observation import adapt_observation
 from poker.ml.observation_v2 import OBS_V2_DIM
+from poker.ml.observation_v3 import OBS_V3_DIM
 from poker.ml.models.nfsp_networks import (
     build_hybrid_network_v2,
     build_policy_network,
@@ -22,6 +23,11 @@ from poker.ml.models.nfsp_networks import (
     make_target_network,
     network_kwargs_from_state_dict,
     sync_target_network,
+)
+from poker.ml.models.nfsp_networks_v3 import (
+    build_hybrid_network_v3,
+    build_policy_network_v3,
+    build_q_network_v3,
 )
 
 # Maximum entries persisted per buffer when saving a checkpoint.
@@ -61,7 +67,10 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
         )
     q_actions = _checkpoint_actions(q_state)
     policy_actions = _checkpoint_actions(policy_state)
-    if q_actions != policy_actions:
+    # A distributional (C51) Q head is num_actions * num_atoms wide while the
+    # policy head stays num_actions, so compare against the policy width only
+    # when the widths are not in a valid multiple relationship.
+    if q_actions != policy_actions and q_actions % policy_actions != 0:
         raise ValueError(
             f"Q head has {q_actions} actions but the policy head has {policy_actions}"
         )
@@ -129,13 +138,34 @@ class NFSPModel:
         distill_kappa: float = 0.0,
         distill_capacity: int = 200_000,
         q_warmup_hands: int = 200,
+        reservoir_min_prob: float = 0.25,
+        n_step: int = 3,
+        value_distribution: str = "c51",
+        num_atoms: int = 51,
+        vmin: float = -10.0,
+        vmax: float = 10.0,
     ) -> None:
-        if obs_version not in (1, 2):
-            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
-        if shared_trunk and obs_version != 2:
-            raise ValueError("shared_trunk requires obs_version=2")
+        if obs_version not in (1, 2, 3):
+            raise ValueError(f"obs_version must be 1, 2 or 3, got {obs_version}")
+        if shared_trunk and obs_version not in (2, 3):
+            raise ValueError("shared_trunk requires obs_version 2 or 3")
         if not 0.0 <= distill_kappa <= 1.0:
             raise ValueError(f"distill_kappa must be in [0, 1], got {distill_kappa}")
+        if not 0.0 <= reservoir_min_prob < 1.0:
+            raise ValueError(
+                f"reservoir_min_prob must be in [0, 1), got {reservoir_min_prob}"
+            )
+        if n_step < 1:
+            raise ValueError(f"n_step must be >= 1, got {n_step}")
+        if value_distribution not in ("none", "c51"):
+            raise ValueError(
+                f"value_distribution must be 'none' or 'c51', got {value_distribution}"
+            )
+        if value_distribution == "c51":
+            if num_atoms < 2:
+                raise ValueError(f"num_atoms must be >= 2, got {num_atoms}")
+            if not vmin < vmax:
+                raise ValueError(f"need vmin < vmax, got {vmin} and {vmax}")
         if epsilon_schedule not in ("linear", "inv_sqrt"):
             raise ValueError(f"epsilon_schedule must be linear or inv_sqrt, got {epsilon_schedule}")
         if updates_per_train < 1:
@@ -182,11 +212,22 @@ class NFSPModel:
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        obs_dim = 98 if obs_version == 1 else OBS_V2_DIM
+        obs_dim = {1: 98, 2: OBS_V2_DIM, 3: OBS_V3_DIM}[obs_version]
+        # float16 halves buffer memory. v3 keeps float32: the tendency block is
+        # already small and low-magnitude, and quantising it costs accuracy on
+        # exactly the features that are hardest to learn.
         self._obs_dtype = np.dtype(np.float16 if obs_version == 2 else np.float32)
         if obs_version == 1:
             self.q_network = build_q_network().to(self.device)
             self.policy_network = build_policy_network().to(self.device)
+        elif obs_version == 3:
+            if shared_trunk:
+                hybrid_v3 = build_hybrid_network_v3().to(self.device)
+                self.q_network = hybrid_v3
+                self.policy_network = hybrid_v3
+            else:
+                self.q_network = build_q_network_v3().to(self.device)
+                self.policy_network = build_policy_network_v3().to(self.device)
         elif shared_trunk:
             # One network, two heads: the policy head and the dueling Q head
             # share card embeddings and the residual trunk.
@@ -196,14 +237,46 @@ class NFSPModel:
         else:
             self.q_network = build_q_network_v2().to(self.device)
             self.policy_network = build_policy_network_v2().to(self.device)
-        self.shared_trunk = bool(shared_trunk and obs_version == 2)
+        self.shared_trunk = bool(shared_trunk and obs_version in (2, 3))
         # A shared module cannot be deep-copied independently of its optimizer
         # wiring, but a frozen copy is exactly what the target net needs.
         self.target_network = make_target_network(self.q_network).to(self.device)
 
+        # Value distribution (item 6). Bimodal poker returns are poorly served
+        # by a scalar mean, so the Q head predicts a categorical distribution
+        # over a fixed support and action selection uses its expectation.
+        self.value_distribution = value_distribution
+        self.num_atoms = int(num_atoms)
+        self.vmin = float(vmin)
+        self.vmax = float(vmax)
+        if value_distribution == "c51":
+            # NFSPModel is not an nn.Module, so the support is a plain tensor
+            # moved to the same device rather than a registered buffer.
+            self._support = torch.linspace(
+                self.vmin, self.vmax, self.num_atoms, device=self.device
+            )
+            self._atom_width = (self.vmax - self.vmin) / (self.num_atoms - 1)
+            # The Q network must emit num_atoms * num_actions logits instead of
+            # num_actions values; heads are swapped in below.
+            self._install_distributional_heads()
+
+        # n-step returns (item 4). With a terminal-only reward, a 1-step TD
+        # target is a chain of zeros; accumulating n_step transitions gives the
+        # first real signal from the end of the hand.
+        self.n_step = int(n_step)
+        self._nstep_pending: deque[tuple[np.ndarray, int, float, np.ndarray]] = deque()
+        self._nstep_rewards: deque[float] = deque()
+
         self.q_buffer = CircularBuffer(capacity=q_capacity, obs_dim=obs_dim, dtype=self._obs_dtype)
         self.policy_buffer = ReservoirBuffer(
-            capacity=policy_capacity, obs_dim=obs_dim, dtype=self._obs_dtype
+            capacity=policy_capacity,
+            obs_dim=obs_dim,
+            dtype=self._obs_dtype,
+            # Item 1: uniform reservoir (min_prob=0) weights an episode-500 best
+            # response the same as one from episode 100,000, so the average
+            # policy is dragged backward by its own history. A positive floor is
+            # exponential averaging, which is what fictitious play requires.
+            min_prob=reservoir_min_prob,
         )
 
         self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=q_lr)
@@ -327,12 +400,123 @@ class NFSPModel:
         obs_t: torch.Tensor,
         mask_t: torch.Tensor,
     ) -> torch.Tensor:
-        """Q-values with illegal actions removed. V2 averages advantages over legal actions."""
-        if self.obs_version == 2:
+        """Q-values with illegal actions masked, shape ``(B, num_actions)``.
+
+        A distributional network is reduced to its expectation so callers
+        (argmax, gather, TD targets) stay scalar-valued.
+        """
+        if self.value_distribution == "c51":
+            probs = self._distributional_forward(network, obs_t)
+            q_vals = (probs * self._support.to(dtype=probs.dtype)).sum(dim=-1)
+            return q_vals.masked_fill(~mask_t, _ILLEGAL_LOGIT)
+        if self.obs_version in (2, 3):
             q_vals = network(obs_t, legal_mask=mask_t)
         else:
             q_vals = network(obs_t)
         return q_vals.masked_fill(~mask_t, _ILLEGAL_LOGIT)
+    # -- distributional value (C51) -----------------------------------
+
+    def _install_distributional_heads(self) -> None:
+        """Attach a separate ``(num_actions, num_atoms)`` head to the Q network.
+
+        ``adv_head`` is left untouched so ``forward()`` keeps returning one
+        scalar per action, which every existing call site (target evaluation,
+        argmax, tests that read ``q_network(x)`` directly) depends on. The
+        distributional head is a parallel branch used only by the C51 loss.
+        """
+        net = self.q_network
+        atoms = self.num_atoms
+        if hasattr(net, "trunk_forward") and hasattr(net, "merge"):
+            trunk_dim = int(net.merge.out_features)
+        elif hasattr(net, "head"):
+            trunk_dim = int(net.head.in_features)
+        else:
+            raise ValueError("cannot install a distributional head on this network")
+
+        if hasattr(net, "policy_head") and not hasattr(net, "adv_head"):
+            # Policy-only network acting as the Q net: give it its own branch.
+            net.policy_head = nn.Linear(trunk_dim, self.num_actions).to(self.device)
+        net.dist_head = nn.Linear(trunk_dim, self.num_actions * atoms).to(self.device)
+        # Start near-uniform so early expectations are centred on the support.
+        nn.init.zeros_(net.dist_head.weight)
+        nn.init.zeros_(net.dist_head.bias)
+        # forward() needs the support bounds to return an expectation.
+        net.vmin = self.vmin  # type: ignore[attr-defined]
+        net.vmax = self.vmax  # type: ignore[attr-defined]
+        self.target_network = make_target_network(net).to(self.device)
+        self.q_optimizer = optim.Adam(net.parameters(), lr=self.q_lr)
+
+    def _distributional_forward(
+        self, network: nn.Module, obs_t: torch.Tensor
+    ) -> torch.Tensor:
+        """``(B, A, atoms)`` probabilities from the distributional branch."""
+        logits = self._distributional_raw(obs_t, network)
+        return torch.softmax(logits, dim=-1)
+
+    def _distributional_raw(
+        self, obs_t: torch.Tensor, network: nn.Module | None = None
+    ) -> torch.Tensor:
+        """``(B, A, atoms)`` logits from ``dist_head`` on the shared trunk."""
+        net = self.q_network if network is None else network
+        dist_head = getattr(net, "dist_head", None)
+        if dist_head is None:
+            raise ValueError("network has no distributional head; rebuild the model")
+        if hasattr(net, "trunk_forward"):
+            hidden = net.trunk_forward(obs_t)  # type: ignore[attr-defined]
+        else:
+            # v1 residual MLP: input_proj -> res_blocks -> output_proj is the
+            # trunk; its head is the final Linear.
+            hidden = net.input_proj(obs_t)  # type: ignore[attr-defined]
+            for block in net.res_blocks:  # type: ignore[attr-defined]
+                hidden = block(hidden)
+            hidden = net.output_proj(hidden)  # type: ignore[attr-defined]
+        return dist_head(hidden).view(-1, self.num_actions, self.num_atoms)
+
+    def _expectation(self, probs_or_raw: torch.Tensor) -> torch.Tensor:
+        """Expected value per action from a distributional or scalar output."""
+        if probs_or_raw.dim() == 2:
+            return probs_or_raw
+        support = self._support.to(dtype=probs_or_raw.dtype)
+        return (probs_or_raw * support).sum(dim=-1)
+
+    def _c51_project(
+        self, next_probs: torch.Tensor, rewards: torch.Tensor, dones: torch.Tensor
+    ) -> torch.Tensor:
+        """Project the bootstrapped next-state distribution onto the fixed support.
+
+        ``next_probs`` is ``(B, atoms)``; ``rewards``/``dones`` are ``(B,)``.
+        Returns a ``(B, atoms)`` distribution over the same support.
+        """
+        atoms = self.num_atoms
+        support = self._support
+        gamma_n = self.gamma ** self.n_step
+        target = rewards.unsqueeze(1) + gamma_n * support.unsqueeze(0) * (
+            1.0 - dones.unsqueeze(1)
+        )
+        target = target.clamp(self.vmin, self.vmax)
+
+        b = (target - self.vmin) / self._atom_width
+        lower = b.floor().to(torch.int64).clamp(0, atoms - 1)
+        upper = b.ceil().to(torch.int64).clamp(0, atoms - 1)
+
+        weight_upper = b - lower.to(b.dtype)
+        weight_lower = 1.0 - weight_upper
+
+        batch = next_probs.shape[0]
+        projected = torch.zeros(
+            (batch, atoms), dtype=next_probs.dtype, device=next_probs.device
+        )
+        # Flatten (B, atoms) -> (B*atoms,) so index_add_ sees matching shapes.
+        rows = torch.arange(batch, device=next_probs.device).unsqueeze(1) * atoms
+        flat_lower = (lower + rows).reshape(-1)
+        flat_upper = (upper + rows).reshape(-1)
+        projected.view(-1).index_add_(
+            0, flat_lower, (next_probs * weight_lower).reshape(-1)
+        )
+        projected.view(-1).index_add_(
+            0, flat_upper, (next_probs * weight_upper).reshape(-1)
+        )
+        return projected
 
     def select_action(
         self,
@@ -403,17 +587,92 @@ class NFSPModel:
         next_obs = self._prepare_obs(next_obs)
         if self.q_buffer.obs_dim != obs.shape[0]:
             self._ensure_buffer_width(int(obs.shape[0]))
+
+        # n-step accumulation (item 4). Rewards are terminal-only, so a 1-step
+        # target is a chain of zeros until the very last decision. Buffering
+        # n_step transitions and emitting a discounted sum gives the first
+        # decisions a real signal from the end of the hand.
+        if self.n_step > 1:
+            self._nstep_pending.append(
+                (
+                    obs.copy(),
+                    int(action),
+                    float(reward),
+                    None if next_mask is None else np.asarray(next_mask, dtype=np.float32).copy(),
+                    None if current_mask is None else np.asarray(current_mask, dtype=np.float32).copy(),
+                    next_obs.copy(),
+                    bool(done),
+                )
+            )
+            if done or len(self._nstep_pending) >= self.n_step:
+                self._flush_nstep()
+            return
+
         self.q_buffer.add(
             obs, action, reward, next_obs, done, next_mask=next_mask, current_mask=current_mask
         )
+
+    def _flush_nstep(self) -> None:
+        """Emit buffered transitions with discounted n-step returns.
+
+        Each buffered step ``i`` is stored with
+        ``R_i = sum_k gamma^k r_{i+k}`` over the window ending at the terminal
+        step (or at ``i + n_step - 1``), bootstrapping from the state after the
+        window. When the window reaches ``done`` the target is not bootstrapped.
+        """
+        buf = list(self._nstep_pending)
+        self._nstep_pending.clear()
+        n = len(buf)
+        for i in range(n):
+            obs_i, action_i, _r_i, next_mask_i, cur_mask_i, _next_obs_i, _done_i = buf[i]
+            total = 0.0
+            terminal = False
+            for k in range(i, min(i + self.n_step, n)):
+                total += (self.gamma ** (k - i)) * buf[k][2]
+                if buf[k][6]:
+                    terminal = True
+                    break
+            if terminal:
+                target_obs = buf[min(i + self.n_step, n) - 1][5]
+                target_mask = np.ones(self.num_actions, dtype=np.float32)
+            else:
+                j = min(i + self.n_step - 1, n - 1)
+                # Bootstrap from the successor of the last transition in the
+                # window, which is that step's own next_obs (not yet buffered).
+                target_obs = buf[j][5]
+                target_mask = next_mask_i if next_mask_i is not None else np.ones(
+                    self.num_actions, dtype=np.float32
+                )
+            self.q_buffer.add(
+                obs_i,
+                action_i,
+                total,
+                target_obs,
+                terminal,
+                next_mask=target_mask,
+                current_mask=cur_mask_i,
+            )
+
+    def flush_pending(self) -> None:
+        """Emit any buffered n-step transitions.
+
+        The n-step window holds up to ``n_step - 1`` transitions at all times,
+        which means a short run can leave them unflushed. Training loops call
+        this at the end of a hand; a caller that only stores transitions must
+        call it before expecting the buffer to be full.
+        """
+        if self._nstep_pending:
+            self._flush_nstep()
 
     def end_hand(self) -> None:
         """Mark one completed hand. Called by the training loop.
 
         The Q warm-up gate counts hands rather than decisions so that "enough
         data" means "enough distinct deals", independent of how many decisions a
-        hand happened to contain.
+        hand happened to contain. Any partially filled n-step window is flushed
+        first so the hand's transitions are not stranded.
         """
+        self.flush_pending()
         self._hands_completed += 1
 
     def ready_to_train_q(self) -> bool:
@@ -469,7 +728,7 @@ class NFSPModel:
         return {"q_loss": q_loss, "policy_loss": policy_loss}
 
     def _update_q(self) -> float:
-        """One Double DQN step. Targets are computed in eval mode (no dropout)."""
+        """One Double DQN (or C51) step. Targets computed in eval mode (no dropout)."""
         batch = self.q_buffer.sample(self.batch_size)
         obs_t = torch.as_tensor(batch["obs"], dtype=torch.float32, device=self.device)
         actions_t = torch.as_tensor(batch["actions"], dtype=torch.int64, device=self.device)
@@ -479,6 +738,11 @@ class NFSPModel:
         current_masks_t = torch.as_tensor(batch["current_masks"], dtype=torch.bool, device=self.device)
         dones_t = torch.as_tensor(batch["dones"], dtype=torch.float32, device=self.device)
 
+        if self.value_distribution == "c51":
+            return self._update_q_distributional(
+                obs_t, actions_t, rewards_t, next_obs_t, next_mask_t, current_masks_t, dones_t
+            )
+
         self.q_network.eval()
         self.target_network.eval()
         with torch.no_grad():
@@ -486,10 +750,12 @@ class NFSPModel:
             # target net evaluates it.
             next_q_online = self._masked_q(self.q_network, next_obs_t, next_mask_t)
             next_actions = next_q_online.argmax(dim=1)
-            if self.obs_version == 2:
+            if self.obs_version in (2, 3):
                 next_q_target = self.target_network(next_obs_t, legal_mask=next_mask_t)
             else:
                 next_q_target = self.target_network(next_obs_t)
+            if next_q_target.shape[-1] != self.num_actions:
+                next_q_target = self._expectation(next_q_target)
             next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
             next_q = torch.where(next_mask_t.any(dim=1), next_q, torch.zeros_like(next_q))
             td_targets = rewards_t + self.gamma * next_q * (1.0 - dones_t)
@@ -533,6 +799,62 @@ class NFSPModel:
         if self._q_updates % self.target_sync_every == 0:
             sync_target_network(self.q_network, self.target_network)
         return float(total_loss.item())
+
+    def _update_q_distributional(
+        self,
+        obs_t: torch.Tensor,
+        actions_t: torch.Tensor,
+        rewards_t: torch.Tensor,
+        next_obs_t: torch.Tensor,
+        next_mask_t: torch.Tensor,
+        current_masks_t: torch.Tensor,
+        dones_t: torch.Tensor,
+    ) -> float:
+        """One C51 step: cross-entropy between the projected target and prediction.
+
+        Poker returns are bimodal (win the pot, or lose the stack), so a scalar
+        mean is true of neither mode. Predicting a distribution over a fixed
+        support keeps the modes and action selection uses its expectation.
+        """
+        self.q_network.eval()
+        self.target_network.eval()
+        with torch.no_grad():
+            # Double DQN action selection uses the expectation of the online
+            # distribution; the target distribution comes from the target net.
+            next_probs_online = self._distributional_forward(self.q_network, next_obs_t)
+            next_values = (next_probs_online * self._support).sum(dim=-1)
+            next_values = next_values.masked_fill(~next_mask_t, _ILLEGAL_LOGIT)
+            next_actions = next_values.argmax(dim=1)
+
+            next_probs = self._distributional_forward(self.target_network, next_obs_t)
+            chosen = next_probs.gather(
+                1, next_actions.view(-1, 1, 1).expand(-1, 1, self.num_atoms)
+            ).squeeze(1)
+            # Illegal or absent next actions contribute no bootstrap.
+            has_next = next_mask_t.any(dim=1).to(dtype=torch.float32)
+            chosen = chosen * has_next.unsqueeze(1)
+
+            target = self._c51_project(chosen, rewards_t, dones_t)
+            # Renormalise: projection can leave numerical residue.
+            target = target / target.sum(dim=1, keepdim=True).clamp(min=1e-8)
+
+        self.q_network.train()
+        raw = self._distributional_raw(obs_t)
+        log_probs = torch.log_softmax(raw.view(-1, self.num_actions, self.num_atoms), dim=-1)
+        picked = log_probs.gather(
+            1, actions_t.view(-1, 1, 1).expand(-1, 1, self.num_atoms)
+        ).squeeze(1)
+        loss = -(target * picked).sum(dim=-1).mean()
+
+        self.q_optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=_GRAD_CLIP)
+        self.q_optimizer.step()
+
+        self._q_updates += 1
+        if self._q_updates % self.target_sync_every == 0:
+            sync_target_network(self.q_network, self.target_network)
+        return float(loss.item())
 
     def _ensure_distill_buffer(self, capacity: int) -> None:
         """(Re)create the distillation memory at the current obs width."""
@@ -711,6 +1033,30 @@ class NFSPModel:
         self.num_actions = int(q_kwargs["num_actions"])
         self.q_lr = q_lr
         self.policy_lr = policy_lr
+        # The checkpoint may carry a distributional branch; rebuild it so the
+        # saved dist_head parameters have somewhere to land.
+        if "dist_head.weight" in q_state:
+            self.value_distribution = "c51"
+            self.num_atoms = int(q_state["dist_head.weight"].shape[0]) // self.num_actions
+            if not hasattr(self, "_support"):
+                self._support = torch.linspace(
+                    self.vmin, self.vmax, self.num_atoms, device=self.device
+                )
+                self._atom_width = (self.vmax - self.vmin) / (self.num_atoms - 1)
+            net = self.q_network
+            if hasattr(net, "merge"):
+                trunk_dim = int(net.merge.out_features)
+            else:
+                trunk_dim = int(net.head.in_features)  # type: ignore[attr-defined]
+            net.dist_head = nn.Linear(trunk_dim, self.num_actions * self.num_atoms).to(  # type: ignore[attr-defined]
+                self.device
+            )
+            net.vmin = self.vmin  # type: ignore[attr-defined]
+            net.vmax = self.vmax  # type: ignore[attr-defined]
+            self.target_network = make_target_network(net).to(self.device)
+            self.q_optimizer = optim.Adam(net.parameters(), lr=q_lr)
+        elif self.value_distribution == "c51" and not hasattr(self.q_network, "dist_head"):
+            self._install_distributional_heads()
 
     def _ensure_buffer_width(self, obs_dim: int) -> None:
         dtype = self._obs_dtype
@@ -778,9 +1124,19 @@ class NFSPModel:
             self.policy_network.load_state_dict(policy_state)
             self.target_network.load_state_dict(checkpoint["target_network"])
         if "q_optimizer" in checkpoint:
-            self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
+            try:
+                self.q_optimizer.load_state_dict(checkpoint["q_optimizer"])
+            except ValueError as exc:
+                # The rebuilt network carries a different parameter set (for
+                # example a distributional branch added since the checkpoint).
+                # Weights already loaded above; only momentum is lost, so warn
+                # rather than silently discarding a genuinely corrupt state.
+                print(f"[WARN] Q optimizer state not restored: {exc}")
         if "policy_optimizer" in checkpoint:
-            self.policy_optimizer.load_state_dict(checkpoint["policy_optimizer"])
+            try:
+                self.policy_optimizer.load_state_dict(checkpoint["policy_optimizer"])
+            except ValueError as exc:
+                print(f"[WARN] policy optimizer state not restored: {exc}")
         self._step = int(checkpoint["step"])
         self.gamma = float(self._config.get("gamma", self.gamma))
         self.eta = float(self._config.get("eta", self.eta))

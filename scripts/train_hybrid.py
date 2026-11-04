@@ -34,7 +34,6 @@ from poker.ml.env import PokerEnv
 from poker.ml.metrics import bb100_interval
 from poker.ml.models.nfsp_model import NFSPModel
 from poker.ml.models.sdcfr_model import SDCFRModel
-from poker.ml.observation_v2 import OBS_V2_DIM, build_observation_v2
 
 _MAX_STEPS = 200
 _EVAL_SEED = 17_001
@@ -90,6 +89,19 @@ def distill_from_teacher(
     obs_batch = np.stack([obs for obs, _ in subset]).astype(np.float32)
     mask_batch = np.stack([mk for _, mk in subset]).astype(np.float32)
 
+    # The teacher may use an older encoder. Its v2 prefix is byte-identical to
+    # the first OBS_V2_DIM entries of a v3 vector (observation_v3 is v2 plus an
+    # appended tendency block), so slice rather than refusing to distil.
+    teacher_width = int(teacher.advantage_network.input_dim)
+    if obs_batch.shape[1] != teacher_width:
+        if obs_batch.shape[1] > teacher_width:
+            obs_batch = obs_batch[:, :teacher_width]
+        else:
+            raise ValueError(
+                f"learner obs is {obs_batch.shape[1]} wide but the teacher expects "
+                f"{teacher_width}; cannot align the encoders"
+            )
+
     teacher.advantage_network.eval()
     with torch.no_grad():
         obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=teacher.device)
@@ -100,9 +112,11 @@ def distill_from_teacher(
         mask = mask_batch[i]
         if mask.sum() < 2:
             continue
-        # Store the raw advantages and the true mask; regret matching is applied
-        # at sample time inside NFSPModel._distillation_step.
-        model.add_regret_sample(obs_batch[i], advantages[i], mask, weight=1.0)
+        # Store the LEARNER's observation (full width) with the teacher's
+        # advantages: the distillation loss runs through the learner's policy
+        # network, so the row must match that network's input width.
+        learner_obs = subset[i][0].astype(np.float32)
+        model.add_regret_sample(learner_obs, advantages[i], mask, weight=1.0)
         added += 1
     return added
 
@@ -128,7 +142,7 @@ def play_episode(
         small_blind=25,
         big_blind=50,
         seed=seed,
-        obs_version=2,
+        obs_version=int(getattr(model, "obs_version", 2)),
         bet_scheme=BetScheme.POT_FRACTION,
     )
     obs, _ = env.reset()
@@ -187,7 +201,7 @@ def evaluate(model: NFSPModel, hands: int, seed: int) -> tuple[float, float, flo
             small_blind=25,
             big_blind=50,
             seed=int(rng.randint(0, 2**31 - 1)),
-            obs_version=2,
+            obs_version=int(getattr(model, "obs_version", 2)),
             bet_scheme=BetScheme.POT_FRACTION,
         )
         obs, _ = env.reset()
@@ -222,6 +236,24 @@ def main() -> None:
                    help="Earliest episode at which stall detection may stop training")
     p.add_argument("--stop-patience", type=int, default=10,
                    help="Evaluations without a better lower bound before stopping")
+    p.add_argument("--updates-per-train", type=int, default=6,
+                   help="Gradient updates per training step. More, smaller steps "
+                        "on fresher data beats fewer large batches at this model size.")
+    p.add_argument("--obs-version", type=int, default=3, choices=(2, 3),
+                   help="Observation encoder: 2 (318-wide) or 3 (354-wide, adds "
+                        "opponent tendencies + attention). v2 checkpoints cannot "
+                        "load into v3.")
+    p.add_argument("--value-distribution", type=str, default="c51",
+                   choices=("none", "c51"),
+                   help="Q head: scalar ('none') or categorical distribution ('c51')")
+    p.add_argument("--num-atoms", type=int, default=51)
+    p.add_argument("--vmin", type=float, default=-10.0)
+    p.add_argument("--vmax", type=float, default=10.0)
+    p.add_argument("--n-step", type=int, default=3,
+                   help="Bootstrap every N transitions instead of every 1")
+    p.add_argument("--reservoir-min-prob", type=float, default=0.25,
+                   help="Exponential averaging floor for the average-policy "
+                        "reservoir; 0 = uniform (drags the policy backward)")
     p.add_argument("--players", type=int, default=6)
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--train-every", type=int, default=64)
@@ -251,7 +283,7 @@ def main() -> None:
           f"iter={teacher.cfr_iteration}")
 
     model = NFSPModel(
-        obs_version=2,
+        obs_version=args.obs_version,
         bet_scheme=BetScheme.POT_FRACTION,
         eta=0.1,
         epsilon_start=0.06,
@@ -261,7 +293,7 @@ def main() -> None:
         gamma=1.0,
         batch_size=args.batch_size,
         train_every=args.train_every,
-        updates_per_train=2,
+        updates_per_train=args.updates_per_train,
         q_lr=2.5e-4,
         policy_lr=1e-4,
         q_capacity=1_000_000,
@@ -270,6 +302,12 @@ def main() -> None:
         q_loss="huber",
         shared_trunk=args.shared_trunk,
         distill_kappa=args.kappa,
+        reservoir_min_prob=args.reservoir_min_prob,
+        n_step=args.n_step,
+        value_distribution=args.value_distribution,
+        num_atoms=args.num_atoms,
+        vmin=args.vmin,
+        vmax=args.vmax,
     )
     if args.checkpoint:
         print(f"[LOAD] {args.checkpoint}")
