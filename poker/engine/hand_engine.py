@@ -204,10 +204,10 @@ def _post_antes(state: GameState, logger: Logger, names: dict[int, str]) -> Game
             AntePosted(
                 hand_number=state.hand_number,
                 seat=seat,
-                amount=state.config.ante,
+                amount=player.stack - new_stack,
                 stack_before=player.stack,
                 stack_after=new_stack,
-                all_in=new_stack <= 0,
+                all_in=state.players[seat].is_all_in,
                 name=names.get(seat, player.name),
                 position=position_label(seat, state.dealer_seat, num_players),
             )

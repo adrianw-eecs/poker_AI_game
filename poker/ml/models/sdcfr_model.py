@@ -16,7 +16,9 @@ from poker.ml.models.nfsp_networks import (
     build_q_network_v2,
     network_kwargs_from_state_dict,
 )
+from poker.ml.models.nfsp_networks_v3 import build_q_network_v3, v3_kwargs_from_state_dict
 from poker.ml.observation_v2 import OBS_V2_DIM
+from poker.ml.observation_v5 import OBS_V5_DIM
 
 _NUM_ACTIONS = 7
 
@@ -25,7 +27,7 @@ _NUM_ACTIONS = 7
 # the two models can be trained on the same representation (see HYBRID_PLAN.md).
 _OBS_DIM_V1 = 98
 _OBS_DIM_V2 = OBS_V2_DIM
-_OBS_DIMS = {1: _OBS_DIM_V1, 2: _OBS_DIM_V2}
+_OBS_DIMS = {1: _OBS_DIM_V1, 2: _OBS_DIM_V2, 5: OBS_V5_DIM}
 # Backwards-compatible alias for callers that imported the old constant.
 _OBS_DIM = _OBS_DIM_V1
 
@@ -55,7 +57,7 @@ class SDCFRModel:
         bet_scheme: BetScheme | None = None,
     ) -> None:
         if obs_version not in _OBS_DIMS:
-            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
+            raise ValueError(f"obs_version must be 1, 2 or 5, got {obs_version}")
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
@@ -67,7 +69,7 @@ class SDCFRModel:
         self.obs_version = obs_version
         self.obs_dim = _OBS_DIMS[obs_version]
         if bet_scheme is None:
-            bet_scheme = BetScheme.POT_FRACTION if obs_version == 2 else BetScheme.LEGACY
+            bet_scheme = BetScheme.POT_FRACTION if obs_version in (2, 5) else BetScheme.LEGACY
         elif not isinstance(bet_scheme, BetScheme):
             bet_scheme = BetScheme(bet_scheme)
         self.bet_scheme = bet_scheme
@@ -90,6 +92,10 @@ class SDCFRModel:
         SD-CFR shares NFSP's representation, which is the prerequisite for
         distilling CFR targets into the NFSP policy head.
         """
+        if self.obs_version >= 5:
+            return build_q_network_v3(
+                input_dim=self.obs_dim, num_actions=_NUM_ACTIONS
+            ).to(self.device)
         if self.obs_version == 2:
             return build_q_network_v2(
                 input_dim=self.obs_dim, num_actions=_NUM_ACTIONS
@@ -252,11 +258,15 @@ class SDCFRModel:
             self.obs_version = int(checkpoint["obs_version"])
         else:
             # Infer from the checkpoint itself: a v2 PokerNetV2 has embeddings.
-            self.obs_version = 2 if "rank_emb.weight" in state else 1
+            # A v5 teacher uses the seat-attention trunk.
+            if "seat_attn.embed.0.weight" in state:
+                self.obs_version = 5
+            else:
+                self.obs_version = 2 if "rank_emb.weight" in state else 1
         self.obs_dim = _OBS_DIMS[self.obs_version]
         if checkpoint.get("bet_scheme"):
             self.bet_scheme = BetScheme(checkpoint["bet_scheme"])
-        elif self.obs_version == 2:
+        elif self.obs_version in (2, 5):
             self.bet_scheme = BetScheme.POT_FRACTION
 
         self.advantage_network = self._rebuild_from_state(state)
@@ -275,6 +285,10 @@ class SDCFRModel:
 
     def _rebuild_from_state(self, state: dict) -> nn.Module:
         """Construct the network whose shapes match a saved state dict."""
+        if "seat_attn.embed.0.weight" in state:
+            kwargs = v3_kwargs_from_state_dict(state)
+            kwargs.pop("arch", None)
+            return build_q_network_v3(**kwargs).to(self.device)
         if "rank_emb.weight" in state:
             kwargs = network_kwargs_from_state_dict(state)
             kwargs.pop("arch", None)

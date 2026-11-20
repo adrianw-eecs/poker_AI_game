@@ -90,20 +90,59 @@ def apply_blind(player: PlayerState, required: int) -> tuple[PlayerState, int, i
 
 
 def post_antes(state: GameState) -> GameState:
-    """Deduct the ante from every non-eliminated player."""
+    """Deduct the ante from every non-eliminated player.
+
+    A short stack posts what it has and is all-in. The ante never drives a
+    stack negative, matching ``apply_blind``.
+    """
     if state.config.ante <= 0:
         return state
     players_list = list(state.players)
     for seat, player in enumerate(state.players):
         if player.is_eliminated:
             continue
-        ante_amount = state.config.ante
-        new_stack = player.stack - ante_amount
-        new_committed_hand = player.committed_this_hand + ante_amount
-        players_list[seat] = player.with_stack(new_stack).with_committed_this_hand(
-            new_committed_hand
+        actual = min(state.config.ante, player.stack)
+        new_stack = player.stack - actual
+        posted = player.with_stack(new_stack).with_committed_this_hand(
+            player.committed_this_hand + actual
         )
+        if new_stack == 0:
+            posted = posted.with_all_in(True)
+        players_list[seat] = posted
     return replace(state, players=tuple(players_list))
+
+
+def may_raise(state: GameState, seat: int) -> bool:
+    """Whether ``seat`` may raise above the current bet.
+
+    A short all-in that does not complete a full raise does not re-open
+    betting for a player who has already acted; that player may only call or
+    fold. A player who has not acted yet may still raise. The first wager of
+    a street is not an incomplete raise, even when it is a short all-in.
+    """
+    player = state.players[seat]
+    to_call = state.current_bet_to_call
+    if to_call <= 0 or player.committed_this_street >= to_call:
+        return True
+    acted = any(actor == seat for actor, _action in state.action_history_this_street)
+    if not acted:
+        return True
+    lower = [
+        other.committed_this_street
+        for other in state.players
+        if other.committed_this_street < to_call
+    ]
+    previous = max(lower) if lower else 0
+    # No matched wager sits under this bet, so it is the opening wager.
+    if previous <= 0:
+        return True
+    prior_min = max(state.config.big_blind, state.last_raise_size)
+    if reopens_betting(Action.all_in(to_call), previous, prior_min):
+        return True
+    return not any(
+        other.is_all_in and other.committed_this_street == to_call and not other.has_folded
+        for other in state.players
+    )
 
 
 def post_blinds(state: GameState, sb_seat: int, bb_seat: int) -> GameState:

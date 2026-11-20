@@ -91,6 +91,7 @@ class Session:
             )
 
         blind_level = self.blind_schedule.level_for_hand(0)
+        config = self.config.with_blinds(blind_level.small, blind_level.big, blind_level.ante)
 
         # Initialize players with full stacks
         players = tuple(
@@ -120,7 +121,7 @@ class Session:
             action_history_this_street=[],
             action_history_this_hand=[],
             deck_remaining_count=52,
-            config=self.config,
+            config=config,
             blind_level=blind_level,
             action_on_seat=None,
         )
@@ -149,6 +150,9 @@ class Session:
 
         # Get blind level for next hand
         blind_level = self.blind_schedule.level_for_hand(next_hand_number)
+        # rules.py posts whatever is on config, so the level has to be copied
+        # onto the config or the schedule never changes the chips.
+        config = self.config.with_blinds(blind_level.small, blind_level.big, blind_level.ante)
 
         # Reset players: clear fold/all-in flags, clear hole cards
         # NOTE: Do NOT filter out eliminated players - keep them with their original seat numbers
@@ -198,7 +202,7 @@ class Session:
             action_history_this_street=[],
             action_history_this_hand=[],
             deck_remaining_count=52,
-            config=self.config,
+            config=config,
             blind_level=blind_level,
             action_on_seat=None,
         )

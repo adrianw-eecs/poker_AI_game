@@ -121,13 +121,13 @@ pytest            # full suite, 235 tests, ~10 s
 - **Side pots** created whenever a player is all-in for less than the current bet
 - **Odd chip** goes to the first eligible seat left of the dealer button
 
-### Known rule deviation
+### Short all-in
 
-A player facing a **short all-in** is still offered a raise. Real NLHE does not
-re-open betting in that spot, so they may only call or fold. `reopens_betting()`
-returns the correct answer, but `legal_actions()` does not consult it when
-building the raise option. This makes the game slightly more permissive than
-real Hold'em. Tracked as the next rules fix.
+A short all-in that does not complete a full raise does not re-open betting.
+`legal_actions()` consults `may_raise()` / `reopens_betting()`: a player who
+has already acted may only call or fold, and an all-in above the current bet
+is withheld. A player who has not acted yet may still raise. The first wager
+of a street is not treated as an incomplete raise.
 
 ---
 
@@ -145,7 +145,6 @@ real Hold'em. Tracked as the next rules fix.
 
 ## Next Steps
 
-1. Fix the short-all-in raise deviation in `legal_actions`.
-2. Migrate SD-CFR to observation v2 + `BetScheme.POT_FRACTION`.
-3. Implement SD-CFR-as-teacher distillation into NFSP (see [`HYBRID_PLAN.md`](HYBRID_PLAN.md)).
-4. Retrain NFSP on the v2 encoder across 2–9 players.
+1. Migrate SD-CFR to observation v2 + `BetScheme.POT_FRACTION`.
+2. Implement SD-CFR-as-teacher distillation into NFSP (see [`HYBRID_PLAN.md`](HYBRID_PLAN.md)).
+3. Retrain NFSP on the v2 encoder across 2–9 players.

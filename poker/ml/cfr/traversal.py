@@ -5,6 +5,7 @@ import numpy.typing as npt
 import torch
 
 from poker.bots.random_bot import RandomBot
+from poker.config.blind_schedule import BlindSchedule
 from poker.config.game_config import GameConfig
 from poker.ml.action_space import BetScheme, build_action_mask
 from poker.ml.buffers import WeightedCircularBuffer
@@ -48,8 +49,8 @@ class ExternalSamplingTraverser:
         obs_version: int = 1,
         bet_scheme: BetScheme = BetScheme.LEGACY,
     ) -> None:
-        if obs_version not in (1, 2):
-            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
+        if obs_version not in (1, 2, 5):
+            raise ValueError(f"obs_version must be 1, 2 or 5, got {obs_version}")
         self.config = config
         self.advantage_network = advantage_network
         self.device = device
@@ -64,7 +65,7 @@ class ExternalSamplingTraverser:
     ) -> npt.NDArray[np.float32]:
         """Pack ``[obs | advantages]`` into one buffer row.
 
-        The obs width depends on the encoder (98 for v1, 318 for v2), so this
+        The obs width depends on the encoder (98 for v1, 318 for v2, 398 for v5), so this
         cannot be a module-level constant. A mismatched width here is what the
         regret buffer would otherwise reject at sample time.
         """
@@ -84,6 +85,13 @@ class ExternalSamplingTraverser:
         cfr_iteration: int,
         opponent_bots: list | None = None,
         num_players: int | None = None,
+        starting_stacks: tuple[int, ...] | None = None,
+        small_blind: int | None = None,
+        big_blind: int | None = None,
+        ante: int | None = None,
+        hand_number: int = 0,
+        blind_schedule: BlindSchedule | None = None,
+        deck_seed: int | None = None,
     ) -> float:
         """Run one traversal and store advantage samples in the regret buffer.
 
@@ -109,16 +117,22 @@ class ExternalSamplingTraverser:
         env = PokerEnv(
             num_players=n,
             starting_stack=self.config.starting_stack,
-            small_blind=self.config.small_blind,
-            big_blind=self.config.big_blind,
-            ante=self.config.ante,
+            small_blind=self.config.small_blind if small_blind is None else small_blind,
+            big_blind=self.config.big_blind if big_blind is None else big_blind,
+            ante=self.config.ante if ante is None else ante,
             learning_seat=traverser_seat,
             opponent_bots=opponent_bots,
             obs_version=self.obs_version,
             bet_scheme=self.bet_scheme,
+            blind_schedule=blind_schedule,
         )
-
-        obs, _ = env.reset()
+        env.hand_number = hand_number
+        options: dict[str, object] = {}
+        if starting_stacks is not None:
+            options["stacks"] = starting_stacks
+        if deck_seed is not None:
+            options["deck_seed"] = deck_seed
+        obs, _ = env.reset(options=options or None)
 
         # Hand may be over before the traverser acts (e.g. everyone folds
         # before reaching their seat in the preflop order).

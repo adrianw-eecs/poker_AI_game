@@ -22,8 +22,13 @@ class CallBot:
     to learn value betting (exploit weak calling).
     """
 
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: int | None = None, name: str = "CallBot"):
         self.seed = seed
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     def act(self, state, legal_actions: list) -> Action:
         """Return a check or a call from the legal Action list.

@@ -8,6 +8,7 @@ Seat slot 0 is the hero and slot ``k`` is ``k`` seats clockwise.
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -66,6 +67,12 @@ class ObsSpecV2:
 
 
 OBS_SPEC_V2 = ObsSpecV2()
+
+# Hero seat block, feature 5: chips committed this hand. The fold target reads
+# this slot. It stays at the same offset when later versions append a tail.
+FOLD_COMMITTED_INDEX = OBS_SPEC_V2.seats[0] + 5
+
+MoneyUnit = Literal["buyin", "bb"]
 
 
 def preflop_combo_index(card_a: Card, card_b: Card) -> int:
@@ -311,7 +318,13 @@ def _hero_block(state: GameState, hero: int) -> list[float]:
     return feats
 
 
-def _seat_block(state: GameState, hero: int, table_seat: int, pot: int) -> list[float]:
+def _seat_block(
+    state: GameState,
+    hero: int,
+    table_seat: int,
+    pot: int,
+    money_unit: MoneyUnit = "buyin",
+) -> list[float]:
     num_players = len(state.players)
     feats = [0.0] * SEAT_DIM
     if table_seat < 0 or table_seat >= num_players:
@@ -324,7 +337,12 @@ def _seat_block(state: GameState, hero: int, table_seat: int, pot: int) -> list[
     big_blind = max(state.config.big_blind, 1)
     feats[3] = _clip01(float(np.log1p(player.stack / big_blind) / np.log1p(200.0)))
     feats[4] = _ratio(player.committed_this_street, max(pot, 1))
-    feats[5] = _ratio(player.committed_this_hand, max(state.config.starting_stack, 1))
+    if money_unit == "bb":
+        # Stack at the start of the hand, exact: what is left plus what is in.
+        stack_at_start = player.stack + player.committed_this_hand
+        feats[5] = _ratio(player.committed_this_hand, max(stack_at_start, 1))
+    else:
+        feats[5] = _ratio(player.committed_this_hand, max(state.config.starting_stack, 1))
     feats[6] = float(table_seat == state.dealer_seat)
     feats[7] = float(table_seat == sb_seat)
     feats[8] = float(table_seat == bb_seat)
@@ -360,6 +378,7 @@ def _street_summary(
     actions: list[tuple[int, object]],
     pot_entering: int,
     reached: bool,
+    money_unit: MoneyUnit = "buyin",
 ) -> list[float]:
     feats = [0.0] * STREET_DIM
     if not reached and not actions:
@@ -388,7 +407,10 @@ def _street_summary(
         feats[4] = (_relative(last_aggressor, hero, num_players) + 1) / MAX_SEATS
         feats[8] = float(last_aggressor == hero)
     feats[5] = _ratio(largest, pot)
-    feats[6] = _ratio(pot_entering, max(state.config.starting_stack, 1))
+    if money_unit == "bb":
+        feats[6] = _sat(pot_entering / max(state.config.big_blind, 1), 20.0)
+    else:
+        feats[6] = _ratio(pot_entering, max(state.config.starting_stack, 1))
     feats[7] = 1.0 if reached or actions else 0.0
     feats[9] = _ratio(len(actions), MAX_SEATS * 2)
     return feats
@@ -422,7 +444,7 @@ def _action_slot(
     return feats
 
 
-def _scalars(state: GameState, hero: int) -> list[float]:
+def _scalars(state: GameState, hero: int, money_unit: MoneyUnit = "buyin") -> list[float]:
     player = state.players[hero]
     pot = sum(pot.amount for pot in state.pots)
     if pot <= 0:
@@ -437,7 +459,11 @@ def _scalars(state: GameState, hero: int) -> list[float]:
         Street.SHOWDOWN: 4,
     }[state.street]
     feats[street_index] = 1.0
-    feats[5] = _ratio(pot, max(state.config.starting_stack, 1))
+    if money_unit == "bb":
+        # Inverse stack-to-pot ratio. A big pot against a short stack saturates.
+        feats[5] = _sat(float(pot), float(max(player.stack, 1)))
+    else:
+        feats[5] = _ratio(pot, max(state.config.starting_stack, 1))
     feats[6] = _ratio(call_chips, max(pot, 1))
     feats[7] = _ratio(call_chips, pot + call_chips) if call_chips else 0.0
     spr = player.stack / max(pot, 1)
@@ -463,8 +489,18 @@ def _scalars(state: GameState, hero: int) -> list[float]:
     return feats
 
 
-def build_observation_v2(state: GameState, seat: int) -> npt.NDArray[np.float32]:
-    """Build the hero-relative v2 vector for ``seat``."""
+def build_observation_v2(
+    state: GameState, seat: int, money_unit: MoneyUnit = "buyin"
+) -> npt.NDArray[np.float32]:
+    """Build the hero-relative v2 vector for ``seat``.
+
+    ``money_unit="buyin"`` divides pot and commitment by the nominal buy-in.
+    ``money_unit="bb"`` uses the stack the hand started with and the big blind,
+    so the same fractions stay meaningful when blinds escalate. The default
+    keeps every existing v2 vector byte-identical.
+    """
+    if money_unit not in ("buyin", "bb"):
+        raise ValueError(f"money_unit must be 'buyin' or 'bb', got {money_unit}")
     num_players = len(state.players)
     if not 0 <= seat < num_players:
         raise ValueError(f"Seat {seat} out of range [0, {num_players - 1}]")
@@ -485,7 +521,7 @@ def build_observation_v2(state: GameState, seat: int) -> npt.NDArray[np.float32]
 
     for offset in range(MAX_SEATS):
         table_seat = (seat + offset) % num_players if offset < num_players else -1
-        features.extend(_seat_block(state, seat, table_seat, pot))
+        features.extend(_seat_block(state, seat, table_seat, pot, money_unit))
 
     segments = _split_streets(state.action_history_this_hand, state.street_history_ends)
     current_street = {
@@ -498,7 +534,9 @@ def build_observation_v2(state: GameState, seat: int) -> npt.NDArray[np.float32]
     for street in range(N_STREET_SUMMARIES):
         entering = state.pots_entering_street[street] if street < len(state.pots_entering_street) else 0
         reached = street <= current_street
-        features.extend(_street_summary(state, seat, segments[street], entering, reached))
+        features.extend(
+            _street_summary(state, seat, segments[street], entering, reached, money_unit)
+        )
 
     indexed = list(enumerate(state.action_history_this_hand))
     tail = indexed[-ACTION_SLOTS:]
@@ -511,7 +549,7 @@ def build_observation_v2(state: GameState, seat: int) -> npt.NDArray[np.float32]
     for item, street in zip(slots, streets):
         features.extend(_action_slot(state, seat, item, street))
 
-    features.extend(_scalars(state, seat))
+    features.extend(_scalars(state, seat, money_unit))
     if len(features) != OBS_V2_DIM:
         raise RuntimeError(f"observation v2 built {len(features)} floats, expected {OBS_V2_DIM}")
     vector = np.asarray(features, dtype=np.float32)

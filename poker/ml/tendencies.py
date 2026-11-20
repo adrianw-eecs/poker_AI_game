@@ -45,15 +45,19 @@ def _smoothed(hits: float, trials: float, alpha: float = _PRIOR_ALPHA,
 
 @dataclass
 class _SeatCounts:
-    """Raw counters behind one seat's tendencies."""
+    """Raw counters behind one seat's tendencies.
 
-    hands: int = 0
-    vpip_hands: int = 0
-    pfr_hands: int = 0
-    aggressive_actions: int = 0
-    calls: int = 0
-    folds_to_bet: int = 0
-    fold_to_bet_opportunities: int = 0
+    Floats so an exponential half-life can decay them without rounding the
+    early hands away.
+    """
+
+    hands: float = 0.0
+    vpip_hands: float = 0.0
+    pfr_hands: float = 0.0
+    aggressive_actions: float = 0.0
+    calls: float = 0.0
+    folds_to_bet: float = 0.0
+    fold_to_bet_opportunities: float = 0.0
 
 
 @dataclass
@@ -67,6 +71,7 @@ class TendencyTracker:
     """
 
     num_players: int
+    half_life: float | None = None
     counts: list[_SeatCounts] = field(default_factory=list)
     _hand_vpip: list[bool] = field(default_factory=list)
     _hand_pfr: list[bool] = field(default_factory=list)
@@ -125,33 +130,61 @@ class TendencyTracker:
             if action_type == ActionType.FOLD:
                 c.folds_to_bet += 1
 
+    def _decay(self) -> None:
+        """Halve every counter once per ``half_life`` hands. No-op when unset."""
+        if self.half_life is None or self.half_life <= 0:
+            return
+        factor = 0.5 ** (1.0 / self.half_life)
+        for counts in self.counts:
+            counts.hands *= factor
+            counts.vpip_hands *= factor
+            counts.pfr_hands *= factor
+            counts.aggressive_actions *= factor
+            counts.calls *= factor
+            counts.folds_to_bet *= factor
+            counts.fold_to_bet_opportunities *= factor
+
     def end_hand(self) -> None:
-        """Fold the hand's flags into the rolling counters."""
+        """Decay older hands, then fold this hand's flags into the counters."""
+        self._decay()
         for seat in range(MAX_SEATS):
-            c = self.counts[seat]
-            c.hands += 1
+            counts = self.counts[seat]
+            counts.hands += 1.0
             if self._hand_vpip[seat]:
-                c.vpip_hands += 1
+                counts.vpip_hands += 1.0
             if self._hand_pfr[seat]:
-                c.pfr_hands += 1
+                counts.pfr_hands += 1.0
 
     def features(self) -> npt.NDArray[np.float32]:
         """``(TENDENCY_DIM,)`` float32 vector, all values in [0, 1]."""
         out = np.zeros(TENDENCY_DIM, dtype=np.float32)
         for seat in range(MAX_SEATS):
-            c = self.counts[seat]
+            counts = self.counts[seat]
             base = seat * TENDENCY_PER_SEAT
-            out[base + 0] = _smoothed(c.vpip_hands, c.hands)
-            out[base + 1] = _smoothed(c.pfr_hands, c.hands)
+            out[base + 0] = _smoothed(counts.vpip_hands, counts.hands)
+            out[base + 1] = _smoothed(counts.pfr_hands, counts.hands)
             # Aggression factor is unbounded; map to [0, 1) with x/(x+1).
-            af = c.aggressive_actions / max(c.calls, 1) if c.calls or c.aggressive_actions else 0.0
+            af = (
+                counts.aggressive_actions / max(counts.calls, 1.0)
+                if counts.calls or counts.aggressive_actions
+                else 0.0
+            )
             out[base + 2] = af / (af + 1.0) if af > 0 else 0.0
-            out[base + 3] = _smoothed(c.folds_to_bet, c.fold_to_bet_opportunities)
+            out[base + 3] = _smoothed(counts.folds_to_bet, counts.fold_to_bet_opportunities)
         return out
 
-    def hands_seen(self, seat: int) -> int:
-        """Completed hands observed for a seat, for callers that want confidence."""
-        return self.counts[seat].hands
+    def confidence(self, seat: int) -> float:
+        """How much the smoothed rate has left the prior, in ``[0, 1]``.
+
+        A seat with no hands is 0. As decayed hands accumulate, this rises
+        toward 1 and the prior stops dominating the feature.
+        """
+        seen = self.counts[seat].hands
+        return float(seen / (seen + _PRIOR_ALPHA + _PRIOR_BETA))
+
+    def hands_seen(self, seat: int) -> float:
+        """Decayed hand count for a seat. This is the confidence sample size."""
+        return float(self.counts[seat].hands)
 
     def reset(self) -> None:
         self.counts = [_SeatCounts() for _ in range(MAX_SEATS)]

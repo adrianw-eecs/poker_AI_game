@@ -29,9 +29,10 @@ from poker.ml.models.nfsp_networks_v3 import (
     v3_kwargs_from_state_dict,
 )
 from poker.ml.observation import adapt_observation
-from poker.ml.observation_v2 import OBS_V2_DIM
+from poker.ml.observation_v2 import FOLD_COMMITTED_INDEX, OBS_V2_DIM
 from poker.ml.observation_v3 import OBS_V3_DIM
 from poker.ml.observation_v4 import EQUITY_INDEX, OBS_V4_DIM
+from poker.ml.observation_v5 import OBS_V5_DIM
 
 # Maximum entries persisted per buffer when saving a checkpoint.
 # Avoids multi-GB checkpoints for large buffers while still warm-starting the
@@ -81,7 +82,7 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
         )
     if meta:
         version = int(meta["obs_version"])
-        expected = {1: "v1", 2: "v2", 3: "v3", 4: "v3"}.get(version)
+        expected = {1: "v1", 2: "v2", 3: "v3", 4: "v3", 5: "v3"}.get(version)
         if expected is not None and q_arch != expected:
             raise ValueError(
                 f"Checkpoint metadata obs_version={version} does not match {q_arch} weights"
@@ -106,10 +107,10 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
             )
     if q_arch == "v3":
         width = v3_input_dim_from_state(q_state)
-        if width not in (OBS_V3_DIM, OBS_V4_DIM):
+        if width not in (OBS_V3_DIM, OBS_V4_DIM, OBS_V5_DIM):
             raise ValueError(
-                f"PokerNetV3 checkpoint input width {width} is neither "
-                f"obs v3 ({OBS_V3_DIM}) nor obs v4 ({OBS_V4_DIM})"
+                f"PokerNetV3 checkpoint input width {width} is not "
+                f"obs v3 ({OBS_V3_DIM}), v4 ({OBS_V4_DIM}) or v5 ({OBS_V5_DIM})"
             )
         if meta:
             version = int(meta["obs_version"])
@@ -120,6 +121,10 @@ def _require_matching_checkpoint(q_state: dict, policy_state: dict, meta: dict) 
             if version == 4 and width != OBS_V4_DIM:
                 raise ValueError(
                     f"Checkpoint says obs v4 but the network width is {width}"
+                )
+            if version == 5 and width != OBS_V5_DIM:
+                raise ValueError(
+                    f"Checkpoint says obs v5 but the network width is {width}"
                 )
     return q_arch
 
@@ -170,10 +175,10 @@ class NFSPModel:
         vmin: float = -10.0,
         vmax: float = 10.0,
     ) -> None:
-        if obs_version not in (1, 2, 3, 4):
-            raise ValueError(f"obs_version must be 1, 2, 3 or 4, got {obs_version}")
-        if shared_trunk and obs_version not in (2, 3, 4):
-            raise ValueError("shared_trunk requires obs_version 2, 3 or 4")
+        if obs_version not in (1, 2, 3, 4, 5):
+            raise ValueError(f"obs_version must be 1, 2, 3, 4 or 5, got {obs_version}")
+        if shared_trunk and obs_version not in (2, 3, 4, 5):
+            raise ValueError("shared_trunk requires obs_version 2, 3, 4 or 5")
         if not 0.0 <= distill_kappa <= 1.0:
             raise ValueError(f"distill_kappa must be in [0, 1], got {distill_kappa}")
         if not 0.0 <= reservoir_min_prob < 1.0:
@@ -239,7 +244,9 @@ class NFSPModel:
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        obs_dim = {1: 98, 2: OBS_V2_DIM, 3: OBS_V3_DIM, 4: OBS_V4_DIM}[obs_version]
+        obs_dim = {1: 98, 2: OBS_V2_DIM, 3: OBS_V3_DIM, 4: OBS_V4_DIM, 5: OBS_V5_DIM}[
+            obs_version
+        ]
         # float16 halves buffer memory. v3 keeps float32: the tendency block is
         # already small and low-magnitude, and quantising it costs accuracy on
         # exactly the features that are hardest to learn.
@@ -247,8 +254,8 @@ class NFSPModel:
         if obs_version == 1:
             self.q_network = build_q_network().to(self.device)
             self.policy_network = build_policy_network().to(self.device)
-        elif obs_version in (3, 4):
-            net_dim = OBS_V4_DIM if obs_version == 4 else OBS_V3_DIM
+        elif obs_version in (3, 4, 5):
+            net_dim = {3: OBS_V3_DIM, 4: OBS_V4_DIM, 5: OBS_V5_DIM}[obs_version]
             if shared_trunk:
                 hybrid_v3 = build_hybrid_network_v3(input_dim=net_dim).to(self.device)
                 self.q_network = hybrid_v3
@@ -265,7 +272,7 @@ class NFSPModel:
         else:
             self.q_network = build_q_network_v2().to(self.device)
             self.policy_network = build_policy_network_v2().to(self.device)
-        self.shared_trunk = bool(shared_trunk and obs_version in (2, 3, 4))
+        self.shared_trunk = bool(shared_trunk and obs_version in (2, 3, 4, 5))
         # A shared module cannot be deep-copied independently of its optimizer
         # wiring, but a frozen copy is exactly what the target net needs.
         self.target_network = make_target_network(self.q_network).to(self.device)
@@ -792,7 +799,7 @@ class NFSPModel:
             # Fold-return target for action 0 (fold)
             fold_legal = current_masks_t[:, 0]
             if self.obs_version == 2:
-                committed_frac = obs_t[:, 48]
+                committed_frac = obs_t[:, FOLD_COMMITTED_INDEX]
                 fold_return = -0.5 * committed_frac
             else:
                 fold_return = torch.zeros_like(fold_legal, dtype=torch.float32, device=self.device)
@@ -1051,9 +1058,13 @@ class NFSPModel:
                     "obs_version": self.obs_version,
                     "bet_scheme": self.bet_scheme.value,
                     "num_actions": self.num_actions,
-                    "arch": {1: "pokernet_v1", 2: "pokernet_v2", 3: "pokernet_v3", 4: "pokernet_v3"}[
-                        self.obs_version
-                    ],
+                    "arch": {
+                        1: "pokernet_v1",
+                        2: "pokernet_v2",
+                        3: "pokernet_v3",
+                        4: "pokernet_v3",
+                        5: "pokernet_v3",
+                    }[self.obs_version],
                     "shared_trunk": self.shared_trunk,
                     "distill_kappa": self.distill_kappa,
                 },
@@ -1072,7 +1083,7 @@ class NFSPModel:
         Zero when the network has no equity head, so v1-v3 updates are unchanged.
         """
         head = getattr(network, "equity_head", None)
-        if self.obs_version != 4 or not isinstance(head, nn.Linear):
+        if self.obs_version < 4 or not isinstance(head, nn.Linear):
             return obs_t.new_zeros(())
         predicted = torch.sigmoid(head(hidden).squeeze(-1))
         return nn.functional.mse_loss(predicted, obs_t[:, EQUITY_INDEX])
@@ -1206,7 +1217,12 @@ class NFSPModel:
         self._config.setdefault("policy_lr", self._config.get("lr", self.policy_lr))
         if arch == "v3":
             width = v3_input_dim_from_state(q_state)
-            self.obs_version = 4 if width == OBS_V4_DIM else 3
+            if width == OBS_V5_DIM:
+                self.obs_version = 5
+            elif width == OBS_V4_DIM:
+                self.obs_version = 4
+            else:
+                self.obs_version = 3
         elif arch == "v2":
             self.obs_version = 2
         else:

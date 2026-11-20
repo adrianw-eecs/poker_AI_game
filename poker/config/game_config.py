@@ -1,6 +1,6 @@
 """Game configuration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import cast
 
@@ -55,11 +55,15 @@ class GameConfig:
         if not 2 <= self.num_players <= 10:
             raise ConfigError(f"num_players must be 2-10, got {self.num_players}")
 
-        if self.starting_stack < 2 * self.big_blind:
+        if self.starting_stack <= 0:
             raise ConfigError(
-                f"starting_stack ({self.starting_stack}) must be at least "
-                f"2 x big_blind ({2 * self.big_blind})"
+                f"starting_stack must be positive, got {self.starting_stack}"
             )
+        # The buy-in is not compared with the current big blind. A tournament
+        # level can move the blind past half the original stack while a deeper
+        # stack is still live; a short stack posts an all-in blind. Whether a
+        # hand can be dealt is decided from the stacks at the table (at least
+        # two stacks above zero), not from this nominal buy-in.
 
         if not 0 <= self.rake_percent <= 100:
             raise ConfigError(
@@ -77,6 +81,25 @@ class GameConfig:
 
         if self.big_blind <= 0:
             raise ConfigError(f"big_blind must be positive, got {self.big_blind}")
+
+    def with_blinds(self, small_blind: int, big_blind: int, ante: int) -> "GameConfig":
+        """Return a config that posts these blinds and this ante.
+
+        The buy-in and the schedule stay as they are. Equal blinds return
+        ``self`` so a fixed schedule does not allocate a new config every hand.
+        """
+        if (
+            self.small_blind == small_blind
+            and self.big_blind == big_blind
+            and self.ante == ante
+        ):
+            return self
+        return replace(
+            self,
+            small_blind=small_blind,
+            big_blind=big_blind,
+            ante=ante,
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Convert config to a dictionary (JSON-safe).

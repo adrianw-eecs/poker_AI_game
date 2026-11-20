@@ -1,6 +1,7 @@
 """Action legality validator for poker game state."""
 
 from poker.domain.action import Action, ActionType
+from poker.engine.rules import may_raise
 from poker.exceptions import IllegalActionError
 from poker.state.game_state import GameState
 
@@ -33,37 +34,43 @@ def legal_actions(state: GameState, seat: int) -> list[Action]:
     # A player who has already put in the current bet (the big blind after limps)
     # may check. They must not be asked to call zero more chips.
     matched = player.committed_this_street >= to_call
+    can_raise = may_raise(state, seat)
 
     # Fold is always available
     actions.append(Action.fold())
 
     if player.stack > 0 and matched:
         actions.append(Action.check())
-        if to_call == 0:
-            min_raise_to = state.config.big_blind
-        else:
-            min_raise_increment = max(state.config.big_blind, state.last_raise_size)
-            min_raise_to = to_call + min_raise_increment
-        max_raise_to = player.stack + player.committed_this_street
-        if max_raise_to >= min_raise_to and min_raise_to > to_call:
-            actions.append(Action.raise_to(min_raise_to))
+        if can_raise:
+            if to_call == 0:
+                min_raise_to = state.config.big_blind
+            else:
+                min_raise_increment = max(state.config.big_blind, state.last_raise_size)
+                min_raise_to = to_call + min_raise_increment
+            max_raise_to = player.stack + player.committed_this_street
+            if max_raise_to >= min_raise_to and min_raise_to > to_call:
+                actions.append(Action.raise_to(min_raise_to))
 
     elif player.stack > 0:
         # Call is the full bet, or an all-in for less when the stack is short.
         call_amount = min(to_call, player.stack + player.committed_this_street)
         actions.append(Action.call(call_amount))
 
-        min_raise_increment = max(state.config.big_blind, state.last_raise_size)
-        min_raise_to = to_call + min_raise_increment
-        max_raise_to = player.stack + player.committed_this_street
-        if max_raise_to >= min_raise_to:
-            actions.append(Action.raise_to(min_raise_to))
+        if can_raise:
+            min_raise_increment = max(state.config.big_blind, state.last_raise_size)
+            min_raise_to = to_call + min_raise_increment
+            max_raise_to = player.stack + player.committed_this_street
+            if max_raise_to >= min_raise_to:
+                actions.append(Action.raise_to(min_raise_to))
 
-    # All-in is available if player has chips and it's not already an available action
+    # All-in is available when the player has chips. An all-in above the
+    # current bet is a raise, so it is withheld when betting did not re-open.
     if player.stack > 0:
         all_in_amount = player.stack + player.committed_this_street
-        if not any(a.type == ActionType.ALL_IN for a in actions):
-            actions.append(Action.all_in(all_in_amount))
+        all_in_raises = all_in_amount > to_call
+        if not (all_in_raises and not can_raise):
+            if not any(a.type == ActionType.ALL_IN for a in actions):
+                actions.append(Action.all_in(all_in_amount))
 
     return actions
 
@@ -115,6 +122,10 @@ def validate(state: GameState, seat: int, action: Action) -> None:
 
     # Raise validation
     if action.type == ActionType.RAISE:
+        if not may_raise(state, seat):
+            raise IllegalActionError(
+                "Cannot raise: a short all-in did not re-open betting"
+            )
         if action.amount <= state.current_bet_to_call:
             raise IllegalActionError(
                 f"Raise amount {action.amount} must exceed bet to call {state.current_bet_to_call}"
@@ -141,6 +152,10 @@ def validate(state: GameState, seat: int, action: Action) -> None:
         if action.amount > player.stack + player.committed_this_street:
             raise IllegalActionError(
                 f"Cannot go all-in for {action.amount} with only {player.stack} chips in stack"
+            )
+        if action.amount > state.current_bet_to_call and not may_raise(state, seat):
+            raise IllegalActionError(
+                "Cannot raise: a short all-in did not re-open betting"
             )
         return
 

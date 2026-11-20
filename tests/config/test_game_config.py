@@ -30,13 +30,24 @@ def test_game_config_construction() -> None:
 @pytest.mark.parametrize("kwargs,match", [
     ({"num_players": 1}, "num_players"),
     ({"num_players": 11}, "num_players"),
-    ({"starting_stack": 15}, "starting_stack"),
+    ({"starting_stack": 0}, "starting_stack"),
     ({"rake_percent": -1.0}, "rake_percent"),
     ({"ante": -1}, "ante"),
 ])
 def test_game_config_invalid(kwargs, match) -> None:
     with pytest.raises(ConfigError, match=match):
         _make_config(**kwargs)
+
+
+def test_buyin_may_sit_below_two_big_blinds() -> None:
+    """A later blind level can pass half the original buy-in."""
+    config = _make_config(starting_stack=100, small_blind=40, big_blind=80)
+    assert config.starting_stack == 100
+    raised = config.with_blinds(250, 500, 50)
+    assert raised.big_blind == 500
+    assert raised.ante == 50
+    assert raised.starting_stack == 100
+    assert config.big_blind == 80
 
 
 def test_game_config_frozen() -> None:

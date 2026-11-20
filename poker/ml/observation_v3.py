@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from poker.ml.observation_v2 import OBS_SPEC_V2, OBS_V2_DIM, build_observation_v2
+from poker.ml.observation_v2 import OBS_SPEC_V2, OBS_V2_DIM, MoneyUnit, build_observation_v2
 from poker.ml.tendencies import TENDENCY_DIM, TendencyTracker
 from poker.state.game_state import GameState
 
@@ -63,6 +63,7 @@ def build_observation_v3(
     state: GameState,
     seat: int,
     tendencies: TendencyTracker | None = None,
+    money_unit: MoneyUnit = "buyin",
 ) -> npt.NDArray[np.float32]:
     """Build the v3 vector for ``seat``.
 
@@ -75,7 +76,7 @@ def build_observation_v3(
         ``(OBS_V3_DIM,)`` float32. The first ``OBS_V2_DIM`` entries are exactly
         what ``build_observation_v2`` returns for the same state and seat.
     """
-    base = build_observation_v2(state, seat)
+    base = build_observation_v2(state, seat, money_unit)
     block = (
         tendencies.features()
         if tendencies is not None
